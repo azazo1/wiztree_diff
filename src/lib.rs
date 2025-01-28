@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::rc::Weak;
 use std::time::{Duration, Instant};
 
 /// 控制调用的时间频率
@@ -75,25 +76,55 @@ struct DiffView {
     // todo
 }
 
-/// 磁盘空间分布,
-/// 储存着特定范围内的文件及其大小信息.
-///
-/// 对应的是文件 WizTree 产生的一个 csv 文件.
-pub struct SpaceDistribution {
-    /// csv 文件数据来源
-    csv: Vec<RawRecord>,
+/// 一个记录节点, 用于构建 [`SpaceDistribution`] 文件树.
+struct RecordNode {
+    raw_record: RawRecord,
+    children: Vec<RecordNode>,
+    parent: Weak<RecordNode>,
 }
 
-pub fn diff() -> DiffView {
-    todo!()
+/// 空间分布, 储存着文件信息.
+///
+/// 对应的是文件 WizTree 产生的一个 csv 文件.
+///
+/// 此结构会对 csv 文件的进行树状结构的解析.
+/// 这个树状结构可能不止一个根节点.
+pub struct SpaceDistribution {
+    roots: Vec<RecordNode>,
+}
+
+impl SpaceDistribution {
+    /// 从 [记录](RawRecord) 中构建一个 [空间分布](SpaceDistribution).
+    ///
+    /// 此方法假定原始记录是按照原始 csv 文件中的行顺序排列的, 没有进行排序过.
+    ///
+    /// 如果传入已经排序过的记录, 会产生错误地结果,
+    /// 此时应该使用性能较劣的 [`SpaceDistribution::from_unordered_records`]
+    /// 以获得正确的输出.
+    /// <!-- todo 有待验证两者性能 -->
+    pub fn from_ordered_records(records: &[RawRecord]) -> SpaceDistribution {
+        todo!();
+    }
+
+    /// 从 [记录](RawRecord) 中构建一个 [空间分布](SpaceDistribution).
+    ///
+    /// 此方法允许输入数组 records 是乱序的,
+    /// 但是性能相比 [`SpaceDistribution::from_ordered_records`] 较弱.
+    pub fn from_unordered_records(records: &[RawRecord]) -> SpaceDistribution {
+        todo!();
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum DiffError {
     #[error("IO error")]
-    Io(#[from] std::io::Error),
-    #[error("CSV value don't match")]
-    Type,
+    Io(#[from] io::Error),
+    /// 可能会和 [`Io`](DiffError::Io) 重叠,
+    ///
+    /// 一般来说, 当 io 错误从 csv 操作中产生的时候,
+    /// 会归因于此.
+    #[error("Csv parsing error")]
+    Csv(#[from] csv::Error),
 }
 
 /// 从 csv 文件路径中创建一个 CSV Reader, 并自动跳过可能的 header 行之前的无效行.
@@ -119,6 +150,10 @@ fn get_csv_reader(path: impl AsRef<Path>) -> Result<csv::Reader<io::BufReader<Fi
         .from_reader(buf_reader);
 
     Ok(reader)
+}
+
+pub fn diff() -> DiffView {
+    todo!()
 }
 
 pub fn diff_file(file1: impl AsRef<Path>, file2: impl AsRef<Path>) -> Result<DiffView, DiffError> {
