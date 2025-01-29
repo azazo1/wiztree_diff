@@ -1,11 +1,9 @@
 mod space_distribution;
 
-use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::fs::File;
 use std::io;
-use std::io::{BufRead, BufReader, Chain, Cursor, Read, Seek};
-use std::ops::{Deref, DerefMut};
+use std::io::{BufRead, BufReader, Chain, Cursor, Read};
 use std::time::{Duration, Instant};
 
 /// 控制调用的时间频率
@@ -112,11 +110,11 @@ mod tests {
         let mut throttle = Throttler::new(Duration::from_secs(1));
         for (i, record) in reader.records().enumerate() {
             let record = record.unwrap();
-            let v: Vec<_> = record.iter().collect();
+            // let v: Vec<_> = record.iter().collect();
             let raw_record: RawRecord = record.deserialize(None).unwrap();
             throttle.throttle_run(|| println!("{i}: {:?}", raw_record));
         }
-        println!("Elapsed: {:?}", start.elapsed());
+        println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 6.34s
     }
 
     #[test]

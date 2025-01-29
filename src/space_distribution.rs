@@ -4,12 +4,13 @@ use std::fs::File;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer};
+use serde::de::{SeqAccess, Visitor};
 use crate::{build_csv_reader, Error};
 
 /// 一个 Record 记录了一个文件(夹)的基本信息.
 /// 对应一个 WizTree 导出的 csv 文件的一行.
-#[derive(Default, Serialize, Deserialize, Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub(crate) struct RawRecord {
     /// 文件名称,
     ///
@@ -32,18 +33,42 @@ pub(crate) struct RawRecord {
     n_files: usize,
     /// 文件夹数量
     n_folders: usize,
-
-    // todo 新增一个 folder bool 变量, 并手动实现 Deserialize 特征
+    /// 是否是文件夹
+    folder: bool,
 }
 
-impl RawRecord {
-    pub(crate) fn is_folder(&self) -> bool {
-        self.path.as_os_str()
-            .to_string_lossy/*转换成字符串, 替换无效字符*/()
-            .ends_with(std::path::MAIN_SEPARATOR_STR)
-    }
-    pub(crate) fn is_file(&self) -> bool {
-        !self.is_folder()
+impl<'de> Deserialize<'de> for RawRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct RawRecordVisitor;
+
+        impl<'d> Visitor<'d> for RawRecordVisitor {
+            type Value = RawRecord;
+
+            fn expecting(&self, formatter: &mut Formatter) -> std::fmt::Result {
+                formatter.write_str("invalid csv row")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'d>,
+            {
+                let mut rec = RawRecord::default();
+                let path_string: String = seq.next_element()?.ok_or_else(|| de::Error::missing_field("path"))?;
+                rec.folder = path_string.ends_with('\\');
+                rec.path = path_string.into();
+                rec.size = seq.next_element()?.ok_or_else(|| de::Error::missing_field("size"))?;
+                rec.alloc = seq.next_element()?.ok_or_else(|| de::Error::missing_field("alloc"))?;
+                rec.modify_time = seq.next_element()?.ok_or_else(|| de::Error::missing_field("modify_time"))?;
+                rec.attributes = seq.next_element()?.ok_or_else(|| de::Error::missing_field("attributes"))?;
+                rec.n_files = seq.next_element()?.ok_or_else(|| de::Error::missing_field("n_files"))?;
+                rec.n_folders = seq.next_element()?.ok_or_else(|| de::Error::missing_field("n_folders"))?;
+                Ok(rec)
+            }
+        }
+        deserializer.deserialize_seq(RawRecordVisitor)
     }
 }
 
@@ -331,7 +356,7 @@ mod tests {
     fn prefix_path() {
         let root: PathBuf = "D:/".into();
         let a: PathBuf = "D:/a".into();
-        let b: PathBuf = "D:/a/b".into();
+        let _b: PathBuf = "D:/a/b".into();
         let b_d: PathBuf = "D:/a/b/..".into();
         let b_dd: PathBuf = "D:/a/b/../..".into();
         assert!(a.starts_with(&root));
@@ -380,6 +405,7 @@ mod tests {
         assert_eq!(PathBuf::from("D:\\a\\b"), PathBuf::from("D:\\a\\b\\"));
     }
 
+    // 不是完整的构造方法, 没设置 folder
     fn new_raw_record(path: impl AsRef<Path>) -> RawRecord {
         let mut rec = RawRecord::default();
         rec.path = path.as_ref().into();
