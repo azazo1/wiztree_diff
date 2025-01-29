@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io;
 use std::io::{BufRead, BufReader, Chain, Cursor, Read, Seek};
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
@@ -91,11 +92,53 @@ struct DiffView {
     // todo
 }
 
+/// 可以实现一个简短 Debug, Display 输出的 [`Rc<RefCell<RecordNode>>`] 类型
+struct RcRecordNode(Rc<RefCell<RecordNode>>);
+
+impl RcRecordNode {
+    fn clone(node: &RcRecordNode) -> Self {
+        Self(Rc::clone(&node.0))
+    }
+}
+
+impl Debug for RcRecordNode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Rc")?; // 在结构体名称前面加上 Rc
+        self.0.borrow().fmt(f)
+    }
+}
+
+impl std::fmt::Display for RcRecordNode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.borrow().path.to_string_lossy())
+    }
+}
+
+impl Deref for RcRecordNode {
+    type Target = Rc<RefCell<RecordNode>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for RcRecordNode {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl AsRef<Rc<RefCell<RecordNode>>> for RcRecordNode {
+    fn as_ref(&self) -> &Rc<RefCell<RecordNode>> {
+        &self.0
+    }
+}
+
 /// 一个记录节点, 用于构建 [`SpaceDistribution`] 文件树.
 #[derive(Debug)]
 struct RecordNode {
     raw_record: RawRecord,
-    children: Vec<Rc<RefCell<RecordNode>>>,
+    children: Vec<RcRecordNode>,
     parent: Weak<RefCell<RecordNode>>,
 }
 
@@ -122,24 +165,24 @@ impl RecordNode {
         }
     }
 
-    fn set_parent(&mut self, parent: &Rc<RefCell<RecordNode>>) {
+    fn set_parent(&mut self, parent: &RcRecordNode) {
         self.parent = Rc::downgrade(parent);
     }
 
     /// 尝试获取父节点.
-    fn parent(&self) -> Option<Rc<RefCell<RecordNode>>> {
-        self.parent.upgrade()
+    fn parent(&self) -> Option<RcRecordNode> {
+        self.parent.upgrade().map(|x| RcRecordNode(x))
     }
 
     /// 放入子节点, 返回子节点的一个强引用.
-    fn push_child(parent: &Rc<RefCell<RecordNode>>, mut child: RecordNode) -> Rc<RefCell<RecordNode>> {
+    fn push_child(parent: &RcRecordNode, mut child: RecordNode) -> RcRecordNode {
         child.set_parent(parent);
-        let rc = Rc::new(RefCell::new(child));
-        parent.borrow_mut().children.push(Rc::clone(&rc));
+        let rc = RcRecordNode(Rc::new(RefCell::new(child)));
+        parent.borrow_mut().children.push(RcRecordNode::clone(&rc));
         rc
     }
 
-    fn last_child_mut(&mut self) -> Option<&mut Rc<RefCell<RecordNode>>> {
+    fn last_child_mut(&mut self) -> Option<&mut RcRecordNode> {
         self.children.last_mut()
     }
 }
@@ -152,7 +195,7 @@ impl RecordNode {
 /// 这个树状结构可能不止一个根节点.
 #[derive(Debug)]
 pub struct SpaceDistribution {
-    roots: Vec<Rc<RefCell<RecordNode>>>,
+    roots: Vec<RcRecordNode>,
 }
 
 impl SpaceDistribution {
@@ -195,7 +238,7 @@ impl SpaceDistribution {
                 // 如果 rec 是 cur_rec 的子目录.
                 cur_rec = RecordNode::push_child(&cur_rec, rec);
             } else {
-                // rec 不是 cur_rec 的子目录, 此处是因为上面的循环 break 了.
+                // rec 不是 cur_rec 的子目录, 此处是因为上面的 while 循环 break 了.
                 cur_rec = sd.push_root(rec);
             }
         }
@@ -215,18 +258,38 @@ impl SpaceDistribution {
     }
 
     /// 从 csv 文件中构建 [`SpaceDistribution`].
+    ///
+    /// csv 文件内容需要是从 WizTree 从文件中直接导出(WizTree 内部排序任意皆可)而不经过任何顺序调整的.
     pub fn from_csv_file(file: impl AsRef<Path>) -> Result<SpaceDistribution, Error> {
         let mut reader = build_csv_reader(File::open(file)?)?;
+        let mut ok = Ok(());
         let records: Vec<_> = reader
             .records()
-            .map(|r| r.unwrap().deserialize(None).unwrap())
+            .map_while(|r| {
+                let string_rec = match r {
+                    Ok(string_rec) => string_rec,
+                    Err(e) => {
+                        ok = Err(e);
+                        return None;
+                    }
+                };
+                match string_rec.deserialize(None) {
+                    Ok(rec) => Some(rec),
+                    Err(e) => {
+                        ok = Err(e);
+                        None
+                    }
+                }
+            })
             .collect();
+        ok?;
         Ok(SpaceDistribution::from_ordered_records(&records))
     }
 
-    fn push_root(&mut self, root: RecordNode) -> Rc<RefCell<RecordNode>> {
-        let rc = Rc::new(RefCell::new(root));
-        self.roots.push(rc.clone());
+    /// 放入新的根节点, 并返回该节点的一个强引用.
+    fn push_root(&mut self, root: RecordNode) -> RcRecordNode {
+        let rc = RcRecordNode(Rc::new(RefCell::new(root)));
+        self.roots.push(RcRecordNode::clone(&rc));
         rc
     }
 }
@@ -276,15 +339,6 @@ fn build_csv_reader<R: Read>(
     );
 
     Ok(reader)
-}
-
-pub fn diff() -> DiffView {
-    todo!()
-}
-
-pub fn diff_file(file1: impl AsRef<Path>, file2: impl AsRef<Path>) -> Result<DiffView, Error> {
-    let builder = csv::ReaderBuilder::new();
-    todo!();
 }
 
 #[cfg(test)]
@@ -365,7 +419,20 @@ mod tests {
 
     #[test]
     fn test_build_space_distribution() {
-        let sd = SpaceDistribution::from_csv_file("example_data/example_small_partial.csv").unwrap();
+        let sd = SpaceDistribution::from_csv_file("example_data/example_multi_roots.csv").unwrap();
         dbg!(sd);
+    }
+
+    #[test]
+    fn bench_build_space_distribution_ordered_records() {
+        let start = Instant::now();
+        let sd = SpaceDistribution::from_csv_file("example_data/example_1.csv").unwrap();
+        println!("Elapsed: {:?}", start.elapsed()); // 10.5s (260w记录)
+        for root in &sd.roots {
+            println!("root: {}", root);
+            for child in &root.borrow().children {
+                println!("  {}", child);
+            }
+        }
     }
 }
