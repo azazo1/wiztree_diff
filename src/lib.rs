@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io;
-use std::io::BufRead;
+use std::io::{BufRead, BufReader, Chain, Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Weak;
 use std::time::{Duration, Instant};
@@ -96,30 +96,32 @@ pub struct SpaceDistribution {
 impl SpaceDistribution {
     /// 从 [记录](RawRecord) 中构建一个 [空间分布](SpaceDistribution).
     ///
-    /// 此方法假定原始记录是按照原始 csv 文件中的行顺序排列的, 没有进行排序过.
+    /// 此方法假定原始记录数组是按照原始 csv 文件中的行顺序排列的
+    /// (wiztree 的所有排列方式都能保证子目录紧随父目录),
+    /// 没有进行排序过.
     ///
     /// 如果传入已经排序过的记录, 会产生错误地结果,
     /// 此时应该使用性能较劣的 [`SpaceDistribution::from_unordered_records`]
     /// 以获得正确的输出.
     /// <!-- todo 有待验证两者性能 -->
-    pub fn from_ordered_records(records: &[RawRecord]) -> SpaceDistribution {
+    fn from_ordered_records(records: &[RawRecord]) -> SpaceDistribution {
         todo!();
     }
 
     /// 从 [记录](RawRecord) 中构建一个 [空间分布](SpaceDistribution).
     ///
-    /// 此方法允许输入数组 records 是乱序的,
+    /// 此方法允许输入 records 数组是乱序的,
     /// 但是性能相比 [`SpaceDistribution::from_ordered_records`] 较弱.
-    pub fn from_unordered_records(records: &[RawRecord]) -> SpaceDistribution {
+    fn from_unordered_records(records: &[RawRecord]) -> SpaceDistribution {
         todo!();
     }
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum DiffError {
+pub enum Error {
     #[error("IO error")]
     Io(#[from] io::Error),
-    /// 可能会和 [`Io`](DiffError::Io) 重叠,
+    /// 可能会和 [`Io`](Error::Io) 重叠,
     ///
     /// 一般来说, 当 io 错误从 csv 操作中产生的时候,
     /// 会归因于此.
@@ -127,27 +129,34 @@ pub enum DiffError {
     Csv(#[from] csv::Error),
 }
 
-/// 从 csv 文件路径中创建一个 CSV Reader, 并自动跳过可能的 header 行之前的无效行.
+/// 以一个 [`Read`] 作为内容, 创建一个 CSV Reader,
+/// 并自动跳过可能的 header 行之前的无效行.
 ///
 /// 此函数假设每个 csv 文件都有至少一个 header 行.
-fn get_csv_reader(path: impl AsRef<Path>) -> Result<csv::Reader<io::BufReader<File>>, csv::Error> {
-    let buf_reader = io::BufReader::new(File::open(path.as_ref())?);
+///
+/// # Parameters
+/// - `content_reader`: csv 内容, 注意不是 csv 文件路径.
+fn build_csv_reader<T: Read>(content_reader: T) -> Result<csv::Reader<Chain<Cursor<String>, BufReader<T>>>, Error> {
+    let mut buf_reader = BufReader::new(content_reader);
     // 找到 header 行
-    let mut n_pre_header_lines = 0;
-    for (i, line) in buf_reader.lines().enumerate() {
-        if line?.contains(",") {
-            n_pre_header_lines = i;
-            break;
+    let header_line = loop {
+        let mut line = String::new();
+        if buf_reader.read_line(&mut line)? == 0 {
+            // 读取到文件末尾
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "No header line found",
+            )));
+        };
+        if line.contains(",") {
+            break line;
         }
-    }
-    let mut buf_reader = io::BufReader::new(File::open(path.as_ref())?);
-    for _ in 0..n_pre_header_lines {
-        buf_reader.read_line(&mut String::new())?;
-    }
+    };
 
-    let reader = csv::ReaderBuilder::new()
-        .has_headers(true)
-        .from_reader(buf_reader);
+    let reader = csv::ReaderBuilder::new().has_headers(true).from_reader(
+        // 拼接回 header 行
+        Cursor::new(header_line + "\n").chain(buf_reader),
+    );
 
     Ok(reader)
 }
@@ -156,7 +165,7 @@ pub fn diff() -> DiffView {
     todo!()
 }
 
-pub fn diff_file(file1: impl AsRef<Path>, file2: impl AsRef<Path>) -> Result<DiffView, DiffError> {
+pub fn diff_file(file1: impl AsRef<Path>, file2: impl AsRef<Path>) -> Result<DiffView, Error> {
     let builder = csv::ReaderBuilder::new();
     todo!();
 }
@@ -167,7 +176,7 @@ mod tests {
     #[test]
     fn test_read_csv_records() {
         let start = Instant::now();
-        let mut reader = get_csv_reader("example_data/example_1.csv").unwrap();
+        let mut reader = build_csv_reader(File::open("example_data/example_1.csv").unwrap()).unwrap();
         let mut throttle = Throttler::new(Duration::from_secs(1));
         for (i, record) in reader.records().enumerate() {
             let record = record.unwrap();
