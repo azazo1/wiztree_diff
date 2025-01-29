@@ -1,3 +1,4 @@
 /target
 .idea
 *.csv
+/example_data

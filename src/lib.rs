@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::fs::File;
 use std::io;
 use std::io::{BufRead, BufReader, Chain, Cursor, Read, Seek};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::rc::Weak;
+use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 /// 控制调用的时间频率
@@ -51,7 +53,9 @@ impl Throttler {
 /// 对应一个 WizTree 导出的 csv 文件的一行.
 #[derive(Default, Serialize, Deserialize, Debug, Clone)]
 struct RawRecord {
-    /// 文件名称
+    /// 文件名称,
+    ///
+    /// 在 Windows 下如果是文件夹, 那么以 `\` 结尾.
     path: PathBuf,
     /// 大小
     size: usize,
@@ -72,15 +76,72 @@ struct RawRecord {
     n_folders: usize,
 }
 
+impl RawRecord {
+    fn is_folder(&self) -> bool {
+        self.path.as_os_str()
+            .to_string_lossy/*转换成字符串, 替换无效字符*/()
+            .ends_with(std::path::MAIN_SEPARATOR_STR)
+    }
+    fn is_file(&self) -> bool {
+        !self.is_folder()
+    }
+}
+
 struct DiffView {
     // todo
 }
 
 /// 一个记录节点, 用于构建 [`SpaceDistribution`] 文件树.
+#[derive(Debug)]
 struct RecordNode {
     raw_record: RawRecord,
-    children: Vec<RecordNode>,
-    parent: Weak<RecordNode>,
+    children: Vec<Rc<RefCell<RecordNode>>>,
+    parent: Weak<RefCell<RecordNode>>,
+}
+
+impl AsRef<RawRecord> for RecordNode {
+    fn as_ref(&self) -> &RawRecord {
+        &self.raw_record
+    }
+}
+
+impl Deref for RecordNode {
+    type Target = RawRecord;
+
+    fn deref(&self) -> &Self::Target {
+        &self.raw_record
+    }
+}
+
+impl RecordNode {
+    fn new(raw_record: RawRecord) -> Self {
+        Self {
+            raw_record,
+            children: Vec::new(),
+            parent: Weak::new(),
+        }
+    }
+
+    fn set_parent(&mut self, parent: &Rc<RefCell<RecordNode>>) {
+        self.parent = Rc::downgrade(parent);
+    }
+
+    /// 尝试获取父节点.
+    fn parent(&self) -> Option<Rc<RefCell<RecordNode>>> {
+        self.parent.upgrade()
+    }
+
+    /// 放入子节点, 返回子节点的一个强引用.
+    fn push_child(parent: &Rc<RefCell<RecordNode>>, mut child: RecordNode) -> Rc<RefCell<RecordNode>> {
+        child.set_parent(parent);
+        let rc = Rc::new(RefCell::new(child));
+        parent.borrow_mut().children.push(Rc::clone(&rc));
+        rc
+    }
+
+    fn last_child_mut(&mut self) -> Option<&mut Rc<RefCell<RecordNode>>> {
+        self.children.last_mut()
+    }
 }
 
 /// 空间分布, 储存着文件信息.
@@ -89,8 +150,9 @@ struct RecordNode {
 ///
 /// 此结构会对 csv 文件的进行树状结构的解析.
 /// 这个树状结构可能不止一个根节点.
+#[derive(Debug)]
 pub struct SpaceDistribution {
-    dummy_root: RecordNode,
+    roots: Vec<Rc<RefCell<RecordNode>>>,
 }
 
 impl SpaceDistribution {
@@ -101,22 +163,41 @@ impl SpaceDistribution {
     /// (wiztree 的所有排列方式都能保证子目录紧随父目录),
     /// 没有进行排序过.
     /// - RawRecord 中所有的路径都是已经解析过的, 不包含 `..` 或 `.` 或符号链接等内容.
+    /// - 没有重复路径的 RawRecord.
+    /// - 一个 RawRecord 的路径如果存在, 那么在它的逐级父路径对应的 RawRecord 都在它之前存在, 直到根节点.
+    ///   比如:
+    ///   > 如果 `/a/b/c/d` 存在, csv 中的根目录为 `/a/b`,
+    ///   > 那么 `/a/b/c` 和 `/a/b` 一定存在且在 `/a/b/c/d` 之前.
     ///
     /// 如果传入已经排序过的记录, 会产生错误地结果,
     /// 此时应该使用性能较劣的 [`SpaceDistribution::from_unordered_records`]
     /// 以获得正确的输出.
     /// <!-- todo 有待验证两者性能 -->
     fn from_ordered_records(records: &[RawRecord]) -> SpaceDistribution {
-        let mut sd = SpaceDistribution {
-            dummy_root: RecordNode {
-                raw_record: Default::default(),
-                children: Vec::new(),
-                parent: Weak::new(),
-            },
-        };
-        let mut cur_rec = &mut sd.dummy_root;
-        for rec in records {
-            if rec.path.starts_with(&cur_rec.raw_record.path) {}
+        if records.is_empty() {
+            return SpaceDistribution { roots: Vec::new() }; // 空值
+        }
+        let mut sd = SpaceDistribution { roots: Vec::new() };
+        let mut cur_rec = sd.push_root(
+            RecordNode::new(records[0].clone()) // 第一个 record 一定是根目录之一.
+        );
+        for raw_rec in &records[1..] {
+            let rec = RecordNode::new(raw_rec.clone());
+            // 不断向上查找, 直到 cur_rec 为 rec 的父目录.
+            while !rec.path.starts_with(&cur_rec.borrow().path) {
+                let Some(parent) = cur_rec.borrow().parent() else {
+                    // cur_rec 如果是根节点.
+                    break;
+                };
+                cur_rec = parent;
+            }
+            if rec.path.starts_with(&cur_rec.borrow().path) {
+                // 如果 rec 是 cur_rec 的子目录.
+                cur_rec = RecordNode::push_child(&cur_rec, rec);
+            } else {
+                // rec 不是 cur_rec 的子目录, 此处是因为上面的循环 break 了.
+                cur_rec = sd.push_root(rec);
+            }
         }
         sd
     }
@@ -125,6 +206,7 @@ impl SpaceDistribution {
     ///
     /// 此方法假定:
     /// - RawRecord 中所有的路径都是已经解析过的, 不包含 `..` 或 `.` 或符号链接等内容.
+    /// - 没有重复路径的 RawRecord.
     ///
     /// 此方法允许输入 records 数组是乱序的,
     /// 但是性能相比 [`SpaceDistribution::from_ordered_records`] 较弱.
@@ -140,6 +222,12 @@ impl SpaceDistribution {
             .map(|r| r.unwrap().deserialize(None).unwrap())
             .collect();
         Ok(SpaceDistribution::from_ordered_records(&records))
+    }
+
+    fn push_root(&mut self, root: RecordNode) -> Rc<RefCell<RecordNode>> {
+        let rc = Rc::new(RefCell::new(root));
+        self.roots.push(rc.clone());
+        rc
     }
 }
 
@@ -232,6 +320,7 @@ mod tests {
         );
     }
     #[test]
+    #[cfg(target_os = "windows")]
     fn prefix_path() {
         let root: PathBuf = "D:/".into();
         let a: PathBuf = "D:/a".into();
@@ -241,11 +330,42 @@ mod tests {
         assert!(a.starts_with(&root));
         assert!(b_d.starts_with(&a));
         assert!(b_dd.starts_with(&a)); // 实际上, 这个应该为 false, 但是 b_dd 这个路径没有标准化
-                                       // 路径的标准化我知道的有两种方法:
-                                       // - 使用 Path::canonicalize, 这个还没了解过具体的情况
-                                       // - 使用 path_clean::clean
+        // 路径的标准化我知道的有两种方法:
+        // - 使用 fs::canonicalize, 这个还没了解过具体的情况, 还不知道其和 Path::canonicalize 的区别.
+        //   两者似乎一样, 但是对 "/" 在 Windows 下进行调用会产生奇怪的值.
+        // - 使用 path_clean::clean
         let b_dd_normalized = path_clean::clean(b_dd.clone());
         dbg!(&b_dd_normalized);
         assert!(!b_dd_normalized.starts_with(&a));
+        // 空路径
+        let root: PathBuf = "/".into();
+        let empty: PathBuf = Default::default();
+        assert!(empty.starts_with(&empty));
+        assert!(!empty.starts_with(&root));
+        assert!(root.starts_with(&empty)); // 空路径满足其他路径的 starts_with
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn canonicalize() {
+        use std::fs::canonicalize;
+        // assert_eq!(canonicalize("/").unwrap(), PathBuf::from("\\\\?\\D:\\"));
+        // 产生的路径是: "\\\\?\\D:\\", `\\?\` 这个前缀似乎是用来表示这个路径是长路径.
+        assert_eq!(canonicalize("D:/").unwrap(), PathBuf::from("\\\\?\\D:\\"));
+        assert_eq!(
+            PathBuf::from("D:/").canonicalize().unwrap(),
+            canonicalize(PathBuf::from("D:/")).unwrap()
+        );
+        assert!(
+            ! // 这里就很麻烦了, 标准化后的路径是以 `\\?\` 开头的, 但是这个前缀仍然参与 starts_with 判断.
+                PathBuf::from("D:/").canonicalize().unwrap()
+                    .starts_with("D:/")
+        );
+    }
+
+    #[test]
+    fn test_build_space_distribution() {
+        let sd = SpaceDistribution::from_csv_file("example_data/example_small_partial.csv").unwrap();
+        dbg!(sd);
     }
 }
