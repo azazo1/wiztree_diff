@@ -13,7 +13,8 @@ thiserror = "2.0.11"
 
 [dev-dependencies]
 criterion = "0.5.1"
+path-clean = "1.0.1"
 
 [[bench]]
-name = "io_benches"
+name = "wiz_bench"
 harness = false

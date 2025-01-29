@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io;
-use std::io::{BufRead, BufReader, Chain, Cursor, Read};
+use std::io::{BufRead, BufReader, Chain, Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::rc::Weak;
 use std::time::{Duration, Instant};
@@ -49,7 +49,7 @@ impl Throttler {
 
 /// 一个 Record 记录了一个文件(夹)的基本信息.
 /// 对应一个 WizTree 导出的 csv 文件的一行.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
 struct RawRecord {
     /// 文件名称
     path: PathBuf,
@@ -90,30 +90,56 @@ struct RecordNode {
 /// 此结构会对 csv 文件的进行树状结构的解析.
 /// 这个树状结构可能不止一个根节点.
 pub struct SpaceDistribution {
-    roots: Vec<RecordNode>,
+    dummy_root: RecordNode,
 }
 
 impl SpaceDistribution {
     /// 从 [记录](RawRecord) 中构建一个 [空间分布](SpaceDistribution).
     ///
-    /// 此方法假定原始记录数组是按照原始 csv 文件中的行顺序排列的
+    /// 此方法假定:
+    /// - 原始记录数组是按照原始 csv 文件中的行顺序排列的
     /// (wiztree 的所有排列方式都能保证子目录紧随父目录),
     /// 没有进行排序过.
+    /// - RawRecord 中所有的路径都是已经解析过的, 不包含 `..` 或 `.` 或符号链接等内容.
     ///
     /// 如果传入已经排序过的记录, 会产生错误地结果,
     /// 此时应该使用性能较劣的 [`SpaceDistribution::from_unordered_records`]
     /// 以获得正确的输出.
     /// <!-- todo 有待验证两者性能 -->
     fn from_ordered_records(records: &[RawRecord]) -> SpaceDistribution {
-        todo!();
+        let mut sd = SpaceDistribution {
+            dummy_root: RecordNode {
+                raw_record: Default::default(),
+                children: Vec::new(),
+                parent: Weak::new(),
+            },
+        };
+        let mut cur_rec = &mut sd.dummy_root;
+        for rec in records {
+            if rec.path.starts_with(&cur_rec.raw_record.path) {}
+        }
+        sd
     }
 
     /// 从 [记录](RawRecord) 中构建一个 [空间分布](SpaceDistribution).
+    ///
+    /// 此方法假定:
+    /// - RawRecord 中所有的路径都是已经解析过的, 不包含 `..` 或 `.` 或符号链接等内容.
     ///
     /// 此方法允许输入 records 数组是乱序的,
     /// 但是性能相比 [`SpaceDistribution::from_ordered_records`] 较弱.
     fn from_unordered_records(records: &[RawRecord]) -> SpaceDistribution {
         todo!();
+    }
+
+    /// 从 csv 文件中构建 [`SpaceDistribution`].
+    pub fn from_csv_file(file: impl AsRef<Path>) -> Result<SpaceDistribution, Error> {
+        let mut reader = build_csv_reader(File::open(file)?)?;
+        let records: Vec<_> = reader
+            .records()
+            .map(|r| r.unwrap().deserialize(None).unwrap())
+            .collect();
+        Ok(SpaceDistribution::from_ordered_records(&records))
     }
 }
 
@@ -132,11 +158,14 @@ pub enum Error {
 /// 以一个 [`Read`] 作为内容, 创建一个 CSV Reader,
 /// 并自动跳过可能的 header 行之前的无效行.
 ///
-/// 此函数假设每个 csv 文件都有至少一个 header 行.
+/// 此函数假定:
+/// - 每个 csv 文件都有至少一个 header 行.
 ///
 /// # Parameters
 /// - `content_reader`: csv 内容, 注意不是 csv 文件路径.
-fn build_csv_reader<T: Read>(content_reader: T) -> Result<csv::Reader<Chain<Cursor<String>, BufReader<T>>>, Error> {
+fn build_csv_reader<R: Read>(
+    content_reader: R,
+) -> Result<csv::Reader<Chain<Cursor<String>, BufReader<R>>>, Error> {
     let mut buf_reader = BufReader::new(content_reader);
     // 找到 header 行
     let header_line = loop {
@@ -176,7 +205,8 @@ mod tests {
     #[test]
     fn test_read_csv_records() {
         let start = Instant::now();
-        let mut reader = build_csv_reader(File::open("example_data/example_1.csv").unwrap()).unwrap();
+        let mut reader =
+            build_csv_reader(File::open("example_data/example_1.csv").unwrap()).unwrap();
         let mut throttle = Throttler::new(Duration::from_secs(1));
         for (i, record) in reader.records().enumerate() {
             let record = record.unwrap();
@@ -200,5 +230,22 @@ mod tests {
                 path: "".into()
             })
         );
+    }
+    #[test]
+    fn prefix_path() {
+        let root: PathBuf = "D:/".into();
+        let a: PathBuf = "D:/a".into();
+        let b: PathBuf = "D:/a/b".into();
+        let b_d: PathBuf = "D:/a/b/..".into();
+        let b_dd: PathBuf = "D:/a/b/../..".into();
+        assert!(a.starts_with(&root));
+        assert!(b_d.starts_with(&a));
+        assert!(b_dd.starts_with(&a)); // 实际上, 这个应该为 false, 但是 b_dd 这个路径没有标准化
+                                       // 路径的标准化我知道的有两种方法:
+                                       // - 使用 Path::canonicalize, 这个还没了解过具体的情况
+                                       // - 使用 path_clean::clean
+        let b_dd_normalized = path_clean::clean(b_dd.clone());
+        dbg!(&b_dd_normalized);
+        assert!(!b_dd_normalized.starts_with(&a));
     }
 }

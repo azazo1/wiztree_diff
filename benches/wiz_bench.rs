@@ -8,9 +8,9 @@ fn count_file_lines() -> usize {
     buf_reader.lines().count()
 }
 
-fn bench_io(c: &mut Criterion) {
+fn bench_functions(c: &mut Criterion) {
     c.bench_function("count_file_lines", |b| b.iter(|| count_file_lines()));
 }
 
-criterion_group!(benches, bench_io);
+criterion_group!(benches, bench_functions);
 criterion_main!(benches);
