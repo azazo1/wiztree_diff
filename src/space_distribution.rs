@@ -468,7 +468,9 @@ impl SpaceDistribution {
     }
 
     /// 返回个节点路径的简单树状图字符串表示.
-    pub fn format_tree(&self) -> String {
+    ///
+    /// - `max_depth` 表示显示的最大深度, 如果为 None, 则表示无限深度.
+    pub fn format_tree(&self, max_depth: Option<usize>) -> String {
         let mut s = String::new();
         for (i, root) in self.iter_roots().enumerate() {
             let i = i + 1;
@@ -478,10 +480,17 @@ impl SpaceDistribution {
                 root.folder,
             ).to_string();
             s.push_str(&format!("Root {i}: {}\n", root_path_string));
-            for child in root.children() {
-                s.push_str(&SpaceDistribution::format_tree_node(
-                    child, 1,
-                ))
+            match max_depth {
+                Some(0) => {
+                    s.push_str("  ...\n");
+                }
+                None | Some(_) => {
+                    for child in root.children() {
+                        s.push_str(&SpaceDistribution::format_tree_node(
+                            child, 1, max_depth,
+                        ))
+                    }
+                }
             }
         }
         s
@@ -490,8 +499,9 @@ impl SpaceDistribution {
     /// 返回一个节点路径的简单树状图字符串表示.
     ///
     /// - `depth` 表示当前节点的深度, 用于缩进, depth 为 1 时缩进 2 空格.
+    /// - `max_depth` 表示显示的最大深度, 如果为 None, 则表示无限深度.
     #[inline(never)]
-    fn format_tree_node(node: &RcRecordNode, depth: usize) -> String {
+    fn format_tree_node(node: &RcRecordNode, depth: usize, max_depth: Option<usize>) -> String {
         let mut s = String::new();
         s.push_str(&"  ".repeat(depth));
         let node = node.borrow();
@@ -503,8 +513,18 @@ impl SpaceDistribution {
             &mut comp_name,
             node.folder,
         )));
-        for child in node.children() {
-            s.push_str(&SpaceDistribution::format_tree_node(child, depth + 1));
+        match max_depth {
+            Some(d) if d == depth => {
+                if node.folder && node.n_folders > 0 {
+                    s.push_str(&"  ".repeat(depth + 1));
+                    s.push_str("...\n");
+                }
+            }
+            None | Some(_) => {
+                for child in node.children() {
+                    s.push_str(&SpaceDistribution::format_tree_node(child, depth + 1, max_depth));
+                }
+            }
         }
         s
     }
@@ -614,7 +634,7 @@ mod tests {
         e
       f\
 "#,
-            sd.format_tree()
+            sd.format_tree(None)
         )
     }
 
@@ -622,7 +642,7 @@ mod tests {
     #[test]
     fn build_space_distribution_ordered() {
         let sd = SpaceDistribution::from_csv_file("example_data/example_small_partial.csv").unwrap();
-        println!("{}", sd.format_tree());
+        println!("{}", sd.format_tree(None));
     }
 
     #[test]
@@ -630,18 +650,13 @@ mod tests {
         let start = Instant::now();
         let sd = SpaceDistribution::from_csv_file("example_data/example_1.csv").unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 10.5s (260w记录)
-        for root in sd.iter_roots() {
-            println!("root: {}", root);
-            for child in root.borrow().children() {
-                println!("  {}", child);
-            }
-        }
+        println!("{}", sd.format_tree(Some(1)));
     }
 
     #[test]
     fn build_sd_from_unordered_csv() {
         let sd = SpaceDistribution::from_unordered_csv_file("example_data/example_multi_roots.csv").unwrap();
-        println!("{}", sd.format_tree());
+        println!("{}", sd.format_tree(None));
     }
 
     #[test]
@@ -649,11 +664,6 @@ mod tests {
         let start = Instant::now();
         let sd = SpaceDistribution::from_unordered_csv_file("example_data/example_1.csv").unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 31.8670859s
-        for root in sd.iter_roots() {
-            println!("root: {}", root);
-            for child in root.borrow().children() {
-                println!("  {}", child);
-            }
-        }
+        println!("{}", sd.format_tree(Some(1)));
     }
 }
