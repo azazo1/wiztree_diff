@@ -342,7 +342,6 @@ impl SpaceDistribution {
     /// 如果传入已经排序过的记录, 会产生错误地结果,
     /// 此时应该使用性能较劣的 [`SpaceDistribution::from_unordered_records`]
     /// 以获得正确的输出.
-    /// <!-- todo 有待验证两者性能 -->
     fn from_ordered_records(records: &[RawRecord]) -> SpaceDistribution {
         if records.is_empty() {
             return SpaceDistribution { roots: Vec::new() }; // 空值
@@ -397,7 +396,7 @@ impl SpaceDistribution {
             // 创建一个临时无用节点, 用于 hash
             // 一次对 Path 的拷贝
             let dummy_node = RcRecordNode::new(RecordNode::new(RawRecord::default_with_path(p.into())));
-            let node = records_set.get(&dummy_node).unwrap();
+            let node = records_set.get(&dummy_node).unwrap(); // 此节点一定存在
             if let Some(parent_p) = p.parent() {
                 // 一次对 Path 的拷贝
                 let dummy_parent_node = RcRecordNode::new(RecordNode::new(RawRecord::default_with_path(parent_p.into())));
