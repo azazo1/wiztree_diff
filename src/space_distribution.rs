@@ -1,6 +1,8 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::ops::{Deref, DerefMut};
 use std::path;
 use std::path::{Path, PathBuf};
@@ -36,6 +38,29 @@ pub(crate) struct RawRecord {
     n_folders: usize,
     /// 是否是文件夹
     folder: bool,
+}
+
+impl RawRecord {
+    fn default_with_path(path: PathBuf) -> RawRecord {
+        let mut rec = RawRecord::default();
+        rec.folder = path.to_string_lossy().ends_with(|x| x == '/' || x == '\\');
+        rec.path = path;
+        rec
+    }
+}
+
+impl PartialEq for RawRecord {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
+}
+
+impl Eq for RawRecord {}
+
+impl Hash for RawRecord {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.path.hash(state);
+    }
 }
 
 /// 如果是文件夹, 确保字符串以路径分隔符结尾, 否则删除结尾的路径分隔符
@@ -112,22 +137,41 @@ impl RcRecordNode {
         RecordNode::push_child(self, child)
     }
 
+    /// 见 [`RcRecordNode::push_rc_child`]
+    fn push_rc_child(&self, child: &RcRecordNode) {
+        RecordNode::push_rc_child(self, child)
+    }
+
     /// 见 [`RecordNode::find_direct_parent`]
     fn find_direct_parent_of(&self, child: &RecordNode) -> Option<RcRecordNode> {
         RecordNode::find_direct_parent(self, child)
     }
 }
 
+impl PartialEq for RcRecordNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.borrow().eq(&other.borrow())
+    }
+}
+
+impl Eq for RcRecordNode {}
+
+impl Hash for RcRecordNode {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.borrow().hash(state);
+    }
+}
+
 impl Debug for RcRecordNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "Rc")?; // 在结构体名称前面加上 Rc
-        self.0.borrow().fmt(f)
+        self.borrow().fmt(f)
     }
 }
 
 impl std::fmt::Display for RcRecordNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0.borrow().path.to_string_lossy())
+        write!(f, "{}", self.borrow().path.to_string_lossy())
     }
 }
 
@@ -162,6 +206,18 @@ pub(crate) struct RecordNode {
 impl AsRef<RawRecord> for RecordNode {
     fn as_ref(&self) -> &RawRecord {
         &self.raw_record
+    }
+}
+
+impl PartialEq for RecordNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw_record == other.raw_record
+    }
+}
+
+impl Hash for RecordNode {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.raw_record.hash(state);
     }
 }
 
@@ -207,6 +263,13 @@ impl RecordNode {
         let rc = RcRecordNode(Rc::new(RefCell::new(child)));
         this.borrow_mut().children.push(RcRecordNode::clone(&rc));
         rc
+    }
+
+    /// 类似 [`RecordNode::push_child`], 但是参数 child 是 [`RcRecordNode`],
+    /// 放入的是 child record 引用的拷贝.
+    fn push_rc_child(this: &RcRecordNode, child: &RcRecordNode) {
+        child.borrow_mut().set_parent(this);
+        this.borrow_mut().children.push(RcRecordNode::clone(child));
     }
 
     /// 从当前节点 this 开始向下查找, 找 child 期望的直接父节点.
@@ -316,15 +379,57 @@ impl SpaceDistribution {
     /// - 没有重复路径的 RawRecord.
     ///
     /// 此方法允许输入 records 数组是乱序的,
-    /// 但是性能相比 [`SpaceDistribution::from_ordered_records`] 较弱.
+    /// 但是性能相比 [`SpaceDistribution::from_ordered_records`] 较差.
     fn from_unordered_records(records: &[RawRecord]) -> SpaceDistribution {
-        todo!();
+        let mut roots = Vec::new();
+        // 一次全量拷贝
+        let records_set: HashSet<_> = records.iter()
+            .map(|raw| RcRecordNode::new(RecordNode::new(raw.clone())))
+            .collect();
+        // 一次全量引用
+        let mut paths: Vec<_> = records.iter()
+            .map(|raw_rec| &raw_rec.path)
+            .collect();
+        // 逐级排序, 保证父目录在子目录之前.
+        paths.sort_unstable_by_key(|x| x.components().count());
+        for p in paths {
+            let mut has_parent = false;
+            // 创建一个临时无用节点, 用于 hash
+            // 一次对 Path 的拷贝
+            let dummy_node = RcRecordNode::new(RecordNode::new(RawRecord::default_with_path(p.into())));
+            let node = records_set.get(&dummy_node).unwrap();
+            if let Some(parent_p) = p.parent() {
+                // 一次对 Path 的拷贝
+                let dummy_parent_node = RcRecordNode::new(RecordNode::new(RawRecord::default_with_path(parent_p.into())));
+                if let Some(parent_node) = records_set.get(&dummy_parent_node) {
+                    parent_node.push_rc_child(node);
+                    has_parent = true;
+                }
+            };
+            if !has_parent {
+                roots.push(RcRecordNode::clone(node));
+            }
+        }
+        SpaceDistribution { roots }
     }
 
     /// 从 csv 文件中构建 [`SpaceDistribution`].
     ///
     /// csv 文件内容需要是从 WizTree 从文件中直接导出(WizTree 内部排序任意皆可)而不经过任何顺序调整的.
     pub fn from_csv_file(file: impl AsRef<Path>) -> Result<SpaceDistribution, Error> {
+        let records = SpaceDistribution::records_from_csv_file(file)?;
+        Ok(SpaceDistribution::from_ordered_records(&records))
+    }
+
+    /// 从 csv 文件中构建 [`SpaceDistribution`].
+    ///
+    /// 同 [`Self::from_ordered_records`], 但是在牺牲性能的情况下允许 csv 的各行记录允许被打乱.
+    pub fn from_unordered_csv_file(file: impl AsRef<Path>) -> Result<SpaceDistribution, Error> {
+        let records = Self::records_from_csv_file(file)?;
+        Ok(Self::from_unordered_records(&records))
+    }
+
+    fn records_from_csv_file(file: impl AsRef<Path>) -> Result<Vec<RawRecord>, Error> {
         let mut reader = build_csv_reader(File::open(file)?)?;
         let mut ok = Ok(());
         let records: Vec<_> = reader
@@ -347,7 +452,7 @@ impl SpaceDistribution {
             })
             .collect();
         ok?;
-        Ok(SpaceDistribution::from_ordered_records(&records))
+        Ok(records)
     }
 
     /// 放入新的根节点, 并返回该节点的一个强引用.
@@ -472,10 +577,7 @@ mod tests {
     }
 
     fn new_raw_record(path: impl AsRef<Path>) -> RawRecord {
-        let mut rec = RawRecord::default();
-        rec.path = path.as_ref().into();
-        rec.folder = path.as_ref().to_string_lossy().ends_with(|x| x == '/' || x == '\\');
-        rec
+        RawRecord::default_with_path(path.as_ref().into())
     }
 
     #[test]
@@ -518,7 +620,7 @@ mod tests {
 
 
     #[test]
-    fn test_build_space_distribution() {
+    fn build_space_distribution_ordered() {
         let sd = SpaceDistribution::from_csv_file("example_data/example_small_partial.csv").unwrap();
         println!("{}", sd.format_tree());
     }
@@ -528,6 +630,25 @@ mod tests {
         let start = Instant::now();
         let sd = SpaceDistribution::from_csv_file("example_data/example_1.csv").unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 10.5s (260w记录)
+        for root in sd.iter_roots() {
+            println!("root: {}", root);
+            for child in root.borrow().children() {
+                println!("  {}", child);
+            }
+        }
+    }
+
+    #[test]
+    fn build_sd_from_unordered_csv() {
+        let sd = SpaceDistribution::from_unordered_csv_file("example_data/example_multi_roots.csv").unwrap();
+        println!("{}", sd.format_tree());
+    }
+
+    #[test]
+    fn bench_build_space_distribution_unordered_records() {
+        let start = Instant::now();
+        let sd = SpaceDistribution::from_unordered_csv_file("example_data/example_1.csv").unwrap();
+        println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 31.8670859s
         for root in sd.iter_roots() {
             println!("root: {}", root);
             for child in root.borrow().children() {
