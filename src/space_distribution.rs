@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::ops::{Deref, DerefMut};
+use std::path;
 use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use serde::{de, Deserialize, Deserializer};
@@ -35,6 +36,28 @@ pub(crate) struct RawRecord {
     n_folders: usize,
     /// 是否是文件夹
     folder: bool,
+}
+
+/// 如果是文件夹, 确保字符串以路径分隔符结尾, 否则删除结尾的路径分隔符
+///
+/// 自动替换 `/` 和 `\` 为当前系统的路径分隔符.
+///
+/// 返回原字符串的借用.
+fn ensure_path_sep(path_str: &mut String, is_folder: bool) -> &mut String {
+    fn pattern(x: char) -> bool {
+        x == '/' || x == '\\'
+    }
+    *path_str = path_str.replace(pattern, path::MAIN_SEPARATOR.to_string().as_str());
+    if is_folder {
+        if !path_str.ends_with(pattern) {
+            path_str.push(path::MAIN_SEPARATOR);
+        }
+    } else {
+        while path_str.ends_with(pattern) {
+            path_str.pop();
+        }
+    }
+    path_str
 }
 
 impl<'de> Deserialize<'de> for RawRecord {
@@ -338,10 +361,53 @@ impl SpaceDistribution {
     pub(crate) fn iter_roots(&self) -> core::slice::Iter<RcRecordNode> {
         self.roots.iter()
     }
+
+    /// 返回个节点路径的简单树状图字符串表示.
+    pub fn format_tree(&self) -> String {
+        let mut s = String::new();
+        for (i, root) in self.iter_roots().enumerate() {
+            let i = i + 1;
+            let root = root.borrow();
+            let root_path_string = ensure_path_sep(
+                &mut root.path.to_string_lossy().to_string(),
+                root.folder,
+            ).to_string();
+            s.push_str(&format!("Root {i}: {}\n", root_path_string));
+            for child in root.children() {
+                s.push_str(&SpaceDistribution::format_tree_node(
+                    child, 1,
+                ))
+            }
+        }
+        s
+    }
+
+    /// 返回一个节点路径的简单树状图字符串表示.
+    ///
+    /// - `depth` 表示当前节点的深度, 用于缩进, depth 为 1 时缩进 2 空格.
+    #[inline(never)]
+    fn format_tree_node(node: &RcRecordNode, depth: usize) -> String {
+        let mut s = String::new();
+        s.push_str(&"  ".repeat(depth));
+        let node = node.borrow();
+        let mut comp_name = node.path.iter()
+            .last()
+            .map_or_else(|| "[no name]".to_string(),
+                         |x| x.to_string_lossy().to_string());
+        s.push_str(&format!("{}\n", ensure_path_sep(
+            &mut comp_name,
+            node.folder,
+        )));
+        for child in node.children() {
+            s.push_str(&SpaceDistribution::format_tree_node(child, depth + 1));
+        }
+        s
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
     use super::*;
 
     #[test]
@@ -405,19 +471,19 @@ mod tests {
         assert_eq!(PathBuf::from("D:\\a\\b"), PathBuf::from("D:\\a\\b\\"));
     }
 
-    // 不是完整的构造方法, 没设置 folder
     fn new_raw_record(path: impl AsRef<Path>) -> RawRecord {
         let mut rec = RawRecord::default();
         rec.path = path.as_ref().into();
+        rec.folder = path.as_ref().to_string_lossy().ends_with(|x| x == '/' || x == '\\');
         rec
     }
 
     #[test]
     fn find_direct_parent() {
         let a = RcRecordNode::new(RecordNode::new(new_raw_record("a")));
-        let b = RecordNode::new(new_raw_record("a/b"));
-        let c = RecordNode::new(new_raw_record("a/b/c"));
-        let d = RecordNode::new(new_raw_record("a/b/c/d"));
+        let b = RecordNode::new(new_raw_record("a/b/"));
+        let c = RecordNode::new(new_raw_record("a/b/c/"));
+        let d = RecordNode::new(new_raw_record("a/b/c/d/"));
         let e = RecordNode::new(new_raw_record("a/b/c/d/e"));
         matches!(RecordNode::find_direct_parent(&a, &b), Some(_));
         for node in [b, c, d, e] {
@@ -426,5 +492,47 @@ mod tests {
                 .push_child(node);
         }
         dbg!(a);
+    }
+
+    #[test]
+    fn format_nodes() {
+        let sd = SpaceDistribution::from_ordered_records(&[
+            new_raw_record("a/"),
+            new_raw_record("a/b/"),
+            new_raw_record("a/b/c/"),
+            new_raw_record("a/b/c/d/"),
+            new_raw_record("a/b/c/d/e"),
+            new_raw_record("a/b/c/f/"),
+        ]);
+        assert_eq!(
+            r#"Root 1: a\
+  b\
+    c\
+      d\
+        e
+      f\
+"#,
+            sd.format_tree()
+        )
+    }
+
+
+    #[test]
+    fn test_build_space_distribution() {
+        let sd = SpaceDistribution::from_csv_file("example_data/example_small_partial.csv").unwrap();
+        println!("{}", sd.format_tree());
+    }
+
+    #[test]
+    fn bench_build_space_distribution_ordered_records() {
+        let start = Instant::now();
+        let sd = SpaceDistribution::from_csv_file("example_data/example_1.csv").unwrap();
+        println!("Elapsed: {:?}", start.elapsed()); // 10.5s (260w记录)
+        for root in sd.iter_roots() {
+            println!("root: {}", root);
+            for child in root.borrow().children() {
+                println!("  {}", child);
+            }
+        }
     }
 }

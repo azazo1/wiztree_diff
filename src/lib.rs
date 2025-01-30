@@ -116,23 +116,4 @@ mod tests {
         }
         println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 6.34s
     }
-
-    #[test]
-    fn test_build_space_distribution() {
-        let sd = SpaceDistribution::from_csv_file("example_data/example_multi_roots.csv").unwrap();
-        dbg!(sd);
-    }
-
-    #[test]
-    fn bench_build_space_distribution_ordered_records() {
-        let start = Instant::now();
-        let sd = SpaceDistribution::from_csv_file("example_data/example_1.csv").unwrap();
-        println!("Elapsed: {:?}", start.elapsed()); // 10.5s (260w记录)
-        for root in sd.iter_roots() {
-            println!("root: {}", root);
-            for child in root.borrow().children() {
-                println!("  {}", child);
-            }
-        }
-    }
 }
