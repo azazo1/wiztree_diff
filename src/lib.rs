@@ -1,4 +1,5 @@
 mod space_distribution;
+mod diff;
 
 use std::fmt::Debug;
 use std::fs::File;
@@ -45,10 +46,6 @@ impl Throttler {
             None
         }
     }
-}
-
-struct DiffView {
-    // todo
 }
 
 #[derive(thiserror::Error, Debug)]

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::ops::{Deref, DerefMut};
 use std::path;
 use std::path::{Path, PathBuf};
@@ -18,26 +19,26 @@ pub(crate) struct RawRecord {
     /// 文件名称,
     ///
     /// 在 Windows 下如果是文件夹, 那么以 `\` 结尾.
-    path: PathBuf,
+    pub(crate) path: PathBuf,
     /// 大小
-    size: usize,
-    /// 分配
-    alloc: usize,
+    pub(crate) size: usize,
+    /// 分配大小
+    pub(crate) alloc: usize,
     /// 修改时间, "yyyy/mm/dd HH:mm:ss"
-    modify_time: String,
+    pub(crate) modify_time: String,
     /// 属性
     /// 属性存储为一个值，并且是以下值的组合相加而成：
     /// 1 = 只读 (R), 2 = 隐藏 (H), 4 = 系统 (S), 32 = 存档 (A), 2048 = 压缩 (C)
     /// 例如，如果一个文件是只读且隐藏的，它的属性值将等于 3（1 + 2）
     ///
     /// 但是有例外, 有的文件的属性值可能为十进制 "268435456"
-    attributes: usize,
+    pub(crate) attributes: usize,
     /// 文件数量
-    n_files: usize,
+    pub(crate) n_files: usize,
     /// 文件夹数量
-    n_folders: usize,
+    pub(crate) n_folders: usize,
     /// 是否是文件夹
-    folder: bool,
+    pub(crate) folder: bool,
 }
 
 impl RawRecord {
@@ -328,6 +329,8 @@ pub struct SpaceDistribution {
 impl SpaceDistribution {
     /// 从 [记录](RawRecord) 中构建一个 [空间分布](SpaceDistribution).
     ///
+    /// 此方法会对输入参数的所有数据进行拷贝.
+    ///
     /// 此方法假定:
     /// - 原始记录数组是按照原始 csv 文件中的行顺序排列的
     ///   (wiztree 的所有排列方式都能保证子目录紧随直接父目录),
@@ -373,6 +376,8 @@ impl SpaceDistribution {
 
     /// 从 [记录](RawRecord) 中构建一个 [空间分布](SpaceDistribution).
     ///
+    /// 此方法会对输入参数的所有数据进行拷贝.
+    ///
     /// 此方法假定:
     /// - RawRecord 中所有的路径都是已经解析过的, 不包含 `..` 或 `.` 或符号链接等内容.
     /// - 没有重复路径的 RawRecord.
@@ -416,20 +421,28 @@ impl SpaceDistribution {
     ///
     /// csv 文件内容需要是从 WizTree 从文件中直接导出(WizTree 内部排序任意皆可)而不经过任何顺序调整的.
     pub fn from_csv_file(file: impl AsRef<Path>) -> Result<SpaceDistribution, Error> {
-        let records = SpaceDistribution::records_from_csv_file(file)?;
-        Ok(SpaceDistribution::from_ordered_records(&records))
+        Self::from_csv_content(File::open(file)?)
     }
 
     /// 从 csv 文件中构建 [`SpaceDistribution`].
     ///
     /// 同 [`Self::from_ordered_records`], 但是在牺牲性能的情况下允许 csv 的各行记录允许被打乱.
     pub fn from_unordered_csv_file(file: impl AsRef<Path>) -> Result<SpaceDistribution, Error> {
-        let records = Self::records_from_csv_file(file)?;
+        Self::from_unordered_csv_content(File::open(file)?)
+    }
+
+    pub fn from_csv_content(csv_content: impl Read) -> Result<SpaceDistribution, Error> {
+        let records = Self::records_from_csv_content(csv_content)?;
+        Ok(Self::from_ordered_records(&records))
+    }
+
+    pub fn from_unordered_csv_content(csv_content: impl Read) -> Result<SpaceDistribution, Error> {
+        let records = Self::records_from_csv_content(csv_content)?;
         Ok(Self::from_unordered_records(&records))
     }
 
-    fn records_from_csv_file(file: impl AsRef<Path>) -> Result<Vec<RawRecord>, Error> {
-        let mut reader = build_csv_reader(File::open(file)?)?;
+    fn records_from_csv_content(csv_content: impl Read) -> Result<Vec<RawRecord>, Error> {
+        let mut reader = build_csv_reader(csv_content)?;
         let mut ok = Ok(());
         let records: Vec<_> = reader
             .records()
@@ -526,6 +539,10 @@ impl SpaceDistribution {
             }
         }
         s
+    }
+    
+    pub(crate) fn total_alloc(&self) -> usize {
+        self.iter_roots().map(|x| x.borrow().alloc).sum()
     }
 }
 
