@@ -1,51 +1,12 @@
 mod space_distribution;
 mod diff;
 
+pub use diff::{Diff, DiffKind, Diffable};
+pub use space_distribution::{SpaceDistribution};
+
 use std::fmt::Debug;
 use std::io;
 use std::io::{BufRead, BufReader, Chain, Cursor, Read};
-use std::time::{Duration, Instant};
-
-/// 控制调用的时间频率
-struct Throttler {
-    last_trigger_time: Instant,
-    interval: Duration,
-}
-
-impl Throttler {
-    fn new(interval: Duration) -> Self {
-        Self {
-            last_trigger_time: Instant::now() - interval, // 确保能直接触发
-            interval,
-        }
-    }
-
-    /// 设置间隔时间并重置触发时间
-    fn set_interval(&mut self, interval: Duration) {
-        self.last_trigger_time = Instant::now() - interval;
-        self.interval = interval;
-    }
-
-    fn throttle(&mut self) -> bool {
-        if self.last_trigger_time.elapsed() >= self.interval {
-            self.last_trigger_time = Instant::now();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn throttle_run<F, R>(&mut self, f: F) -> Option<R>
-    where
-        F: FnOnce() -> R,
-    {
-        if self.throttle() {
-            Some(f())
-        } else {
-            None
-        }
-    }
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -101,6 +62,49 @@ mod tests {
     use super::*;
     use crate::space_distribution::RawRecord;
     use std::fs::File;
+    use std::time::{Duration, Instant};
+
+    /// 控制调用的时间频率
+    struct Throttler {
+        last_trigger_time: Instant,
+        interval: Duration,
+    }
+
+    impl Throttler {
+        fn new(interval: Duration) -> Self {
+            Self {
+                last_trigger_time: Instant::now() - interval, // 确保能直接触发
+                interval,
+            }
+        }
+
+        /// 设置间隔时间并重置触发时间
+        fn set_interval(&mut self, interval: Duration) {
+            self.last_trigger_time = Instant::now() - interval;
+            self.interval = interval;
+        }
+
+        fn throttle(&mut self) -> bool {
+            if self.last_trigger_time.elapsed() >= self.interval {
+                self.last_trigger_time = Instant::now();
+                true
+            } else {
+                false
+            }
+        }
+
+        fn throttle_run<F, R>(&mut self, f: F) -> Option<R>
+        where
+            F: FnOnce() -> R,
+        {
+            if self.throttle() {
+                Some(f())
+            } else {
+                None
+            }
+        }
+    }
+
     #[test]
     fn test_read_csv_records() {
         let start = Instant::now();

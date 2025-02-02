@@ -5,6 +5,7 @@ edition = "2021"
 
 [lib]
 name = "wiztree_diff_lib"
+path = "src/lib.rs"
 
 [env]
 RUST_LOG = "debug"

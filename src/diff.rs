@@ -1,21 +1,19 @@
-use std::cell::Ref;
 use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Formatter;
-use std::path::{Component, Path, PathBuf, Prefix};
-use std::slice::Iter;
-use crate::space_distribution::{RcRecordNode, RecordNode, SpaceDistribution};
+use std::path::{Component, Path, PathBuf};
+use crate::space_distribution::{RcRecordNode, SpaceDistribution};
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
-pub(crate) enum Error {
+pub enum Error {
     #[error("Failed to diff given node for both node being None")]
     BothNone,
     #[error("Path between two node are in different paths")]
     PathNEqual,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum DiffKind {
     /// 节点新建
     New,
@@ -25,7 +23,8 @@ pub enum DiffKind {
     SizeChanged,
 }
 
-struct DiffNode {
+/// 用于比较一对相同路径的文件夹或者文件的节点
+pub struct DiffNode {
     kind: DiffKind,
     /// 节点大小变化的字节数, 参考的是节点的分配大小而不是内容大小.
     delta: isize,
@@ -35,19 +34,31 @@ struct DiffNode {
     older_side_node: Option<RcRecordNode>,
 }
 
-impl<'a> fmt::Debug for DiffNode {
+impl fmt::Debug for DiffNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        struct DebugOption<T>(Option<T>);
+        impl<T: fmt::Debug> fmt::Debug for DebugOption<T> {
+            fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+                match &self.0 {
+                    Some(v) => write!(f, "Some({:?})", v),
+                    None => write!(f, "None"),
+                }
+            }
+        }
+
         f.debug_struct("DiffNode")
             .field("kind", &self.kind)
             .field("delta", &self.delta)
-            .field("newer_side_node", &match &self.newer_side_node {
-                Some(node) => node.borrow().path.to_string_lossy().to_string(),
-                None => "[None]".to_string(),
-            })
-            .field("newer_side_node", &match &self.older_side_node {
-                Some(node) => node.borrow().path.to_string_lossy().to_string(),
-                None => "[None]".to_string(),
-            })
+            .field("newer_side_node", &DebugOption(
+                self.newer_side_node.as_ref().map(
+                    |node| node.borrow().path.to_string_lossy().to_string()
+                )
+            ))
+            .field("older_side_node", &DebugOption(
+                self.older_side_node.as_ref().map(
+                    |node| node.borrow().path.to_string_lossy().to_string()
+                )
+            ))
             .finish()
     }
 }
@@ -96,7 +107,7 @@ impl DiffNode {
     }
 
     /// 获取 newer_side_node 和 older_side_node 的父节点.
-    pub fn get_parents(&self) -> (Option<RcRecordNode>, Option<RcRecordNode>) {
+    pub(crate) fn get_parents(&self) -> (Option<RcRecordNode>, Option<RcRecordNode>) {
         (self.newer_side_node.as_ref().and_then(|node| node.borrow().parent()),
          self.older_side_node.as_ref().and_then(|node| node.borrow().parent()))
     }
@@ -105,6 +116,16 @@ impl DiffNode {
     fn find_children(&self, comp: Component) -> (Option<RcRecordNode>, Option<RcRecordNode>) {
         (self.newer_side_node.as_ref().and_then(|n| n.borrow().find_child(comp)),
          self.older_side_node.as_ref().and_then(|n| n.borrow().find_child(comp)))
+    }
+
+    /// 节点分配大小的变化字节数
+    pub fn delta(&self) -> isize {
+        self.delta
+    }
+
+    /// 节点变化类型
+    pub fn kind(&self) -> DiffKind {
+        self.kind
     }
 }
 
@@ -260,7 +281,7 @@ impl<'sd> Diff<'sd> {
                 self.view_node(self.newer.search_node(comp), self.older.search_node(comp))?;
             }
             Component::RootDir => {
-                if !cfg!(target_os="windows") {
+                if !cfg!(windows) {
                     self.view_node(
                         self.newer.find_root("/"),
                         self.newer.find_root("/"),
@@ -298,6 +319,16 @@ impl<'sd> Diff<'sd> {
         );
         self.nodes = Diff::diff_records(self.newer.iter_roots(), self.older.iter_roots());
     }
+
+    /// 获取当前正在观察比较的节点下的子节点.
+    pub fn nodes(&self) -> &[DiffNode] {
+        &self.nodes
+    }
+
+    /// 获取当前正在观察的路径, 如果当前正在观察各个根节点, 则返回 None.
+    pub fn current_path(&self) -> Option<PathBuf> {
+        self.current_node.get_path()
+    }
 }
 
 pub trait Diffable {
@@ -321,11 +352,11 @@ impl Diffable for SpaceDistribution {
 mod tests {
     use std::ffi::OsStr;
     use std::io::Cursor;
-    use std::path::PrefixComponent;
+    use std::path::{Prefix, PrefixComponent};
     use super::*;
 
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     fn build_diff() {
         const OLDER: &str = r#"
 文件名称,大小,分配,修改时间,属性,文件,文件夹
@@ -383,6 +414,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn parent_path() {
         let path: PathBuf = "D:\\".into();
         let mut it = path.components();
@@ -406,5 +438,6 @@ mod tests {
         assert!(matches!(prefix.kind(), Prefix::Disk(68)));
         let path_from_prefix_comp = Path::new(prefix.as_os_str());
         dbg!(path_from_prefix_comp);
+        assert_eq!(PathBuf::from("D:/"), PathBuf::from("D:\\"));
     }
 }

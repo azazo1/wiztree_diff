@@ -542,28 +542,25 @@ impl SpaceDistribution {
         let mut cur_path = PathBuf::from("");
         let mut node: Option<RcRecordNode> = None;
         for comp in path.components() {
+            // 更新 cur_path
             match comp {
-                Component::CurDir => (),
-                Component::ParentDir | Component::Normal(_) | Component::Prefix(_) => {
-                    // 更新 cur_path
-                    match comp {
-                        Component::ParentDir => { cur_path.pop(); }
-                        Component::CurDir => continue,
-                        _ => { cur_path.push(comp); }
-                    }
-                    if node.is_some() {
-                        if comp == Component::ParentDir {
-                            node = node.unwrap().borrow().parent();
-                        } else {
-                            node = node.unwrap().borrow().find_child(comp)
-                        }
-                    } else {
-                        node = self.find_root(&cur_path);
-                    }
-                }
-                Component::RootDir => {
+                Component::ParentDir => { cur_path.pop(); }
+                Component::CurDir => continue,
+                Component::Prefix(_) if cfg!(windows) => {
                     cur_path.push(comp);
+                    cur_path.push(Component::RootDir); // windows 下自动添加 "\\"
                 }
+                Component::RootDir if cfg!(windows) => continue,
+                _ => { cur_path.push(comp); }
+            }
+            if node.is_some() {
+                if comp == Component::ParentDir {
+                    node = node.unwrap().borrow().parent();
+                } else {
+                    node = node.unwrap().borrow().find_child(comp)
+                }
+            } else {
+                node = self.find_root(&cur_path);
             }
         }
         #[cfg(test)]
@@ -590,7 +587,7 @@ mod tests {
         );
     }
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     fn prefix_path() {
         let root: PathBuf = "D:/".into();
         let a: PathBuf = "D:/a".into();
@@ -616,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     fn canonicalize_path() {
         use std::fs::canonicalize;
         // assert_eq!(canonicalize("/").unwrap(), PathBuf::from("\\\\?\\D:\\"));
@@ -635,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     fn path_eq() {
         assert_eq!(PathBuf::from("a\\"), PathBuf::from("a"));
         assert_eq!(PathBuf::from("D:/a/b"), PathBuf::from("D:/a/b/"));
@@ -707,7 +704,7 @@ mod tests {
             new_raw_record("a/b/c/h/"),
         ]);
         assert_eq!(sd.get_common_path_prefix().unwrap(), PathBuf::from("a/b/"));
-        #[cfg(target_os = "windows")]
+        #[cfg(windows)]
         {
             let sd = SpaceDistribution::from_ordered_records(&[
                 new_raw_record("D:/"),
@@ -724,13 +721,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     fn path_file_name() {
         assert_eq!(PathBuf::from("D:/").file_name(), None);
     }
 
     #[test]
-    #[cfg(target_os = "windows")]
+    #[cfg(windows)]
     fn path_disk_prefix() {
         let mut path = PathBuf::from("D:");
         let mut comps = path.components();
@@ -746,7 +743,7 @@ mod tests {
         path.push("a");
         assert_eq!(path, PathBuf::from("D:a"))
     }
-    
+
     #[test]
     fn trailing_slash_path() {
         let slashed = Path::new("D:/");
