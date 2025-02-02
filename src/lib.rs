@@ -19,7 +19,7 @@ pub enum Error {
     #[error("Csv parsing error")]
     Csv(#[from] csv::Error),
     #[error("Error in diffing two space distribution")]
-    Diff(#[from] diff::Error),
+    Diffing(#[from] diff::Error),
 }
 
 /// 以一个 [`Read`] 作为内容, 创建一个 CSV Reader,

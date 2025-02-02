@@ -1,5 +1,4 @@
-use std::path::PathBuf;
-use wiztree_diff_lib::{Diff, SpaceDistribution};
+use wiztree_diff::{Diff, SpaceDistribution};
 
 #[test]
 #[cfg(windows)]
