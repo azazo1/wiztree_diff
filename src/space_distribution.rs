@@ -1,3 +1,6 @@
+use crate::{build_csv_reader, Error};
+use serde::de::{SeqAccess, Visitor};
+use serde::{de, Deserialize, Deserializer};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
@@ -6,11 +9,8 @@ use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::ops::{Deref, DerefMut};
 use std::path;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::rc::{Rc, Weak};
-use serde::{de, Deserialize, Deserializer};
-use serde::de::{SeqAccess, Visitor};
-use crate::{build_csv_reader, Error};
 
 /// 一个 Record 记录了一个文件(夹)的基本信息.
 /// 对应一个 WizTree 导出的 csv 文件的一行.
@@ -125,7 +125,7 @@ impl<'de> Deserialize<'de> for RawRecord {
 pub(crate) struct RcRecordNode(Rc<RefCell<RecordNode>>);
 
 impl RcRecordNode {
-    fn clone(node: &RcRecordNode) -> Self {
+    pub(crate) fn clone(node: &RcRecordNode) -> Self {
         Self(Rc::clone(&node.0))
     }
 
@@ -141,11 +141,6 @@ impl RcRecordNode {
     /// 见 [`RcRecordNode::push_rc_child`]
     fn push_rc_child(&self, child: &RcRecordNode) {
         RecordNode::push_rc_child(self, child)
-    }
-
-    /// 见 [`RecordNode::find_direct_parent`]
-    fn find_direct_parent_of(&self, child: &RecordNode) -> Option<RcRecordNode> {
-        RecordNode::find_direct_parent(self, child)
     }
 }
 
@@ -248,8 +243,8 @@ impl RecordNode {
     }
 
     /// 尝试获取父节点的强引用.
-    fn parent(&self) -> Option<RcRecordNode> {
-        self.parent.upgrade().map(|x| RcRecordNode(x))
+    pub(crate) fn parent(&self) -> Option<RcRecordNode> {
+        self.parent.upgrade().map(RcRecordNode)
     }
 
     pub(crate) fn children(&self) -> &[RcRecordNode] {
@@ -257,8 +252,6 @@ impl RecordNode {
     }
 
     /// 将节点 child 放入 this 的直接子节点列表中, 返回对应子节点的一个强引用.
-    ///
-    /// 如果需要将 child 放入合适的父节点, 可以使用 [`RecordNode::find_direct_parent`] 然后在返回值调用此方法.
     fn push_child(this: &RcRecordNode, mut child: RecordNode) -> RcRecordNode {
         child.set_parent(this);
         let rc = RcRecordNode(Rc::new(RefCell::new(child)));
@@ -273,45 +266,17 @@ impl RecordNode {
         this.borrow_mut().children.push(RcRecordNode::clone(child));
     }
 
-    /// 从当前节点 this 开始向下查找, 找 child 期望的直接父节点.
-    ///
-    /// 比如:
-    /// 如果当前节点为 `/a`, child 为 `/a/b/c/d`,
-    /// 那么 `/a/b/c` 就是 child 期望的直接父节点.
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// if let Some(parent) = RecordNode::find_direct_parent(&root_node, &child_node) {
-    ///    RecordNode::push_child(&parent, child_node);
-    /// }
-    /// ```
-    ///
-    /// # Returns
-    /// 如果找到了, 返回直接父节点的强引用, 否则返回 None.
-    fn find_direct_parent(this: &RcRecordNode, child: &RecordNode) -> Option<RcRecordNode> {
-        let borrowed_this = this.borrow();
-        if child.path.starts_with(&borrowed_this.path) {
-            // 判断是否是直接父目录
-            let this_comp_cnt = borrowed_this.path.components().count();
-            let child_comp_cnt = child.path.components().count();
-            let expected_comp_cnt = match child_comp_cnt.checked_sub(1) {
-                Some(x) => x,
-                None => return None,
-            };
-            if this_comp_cnt == expected_comp_cnt {
-                Some(RcRecordNode::clone(this))
-            } else {
-                for sub_this in borrowed_this.children() {
-                    if let Some(p) = RecordNode::find_direct_parent(sub_this, child) {
-                        return Some(p);
-                    }
-                }
-                None
-            }
-        } else {
-            None
-        }
+    /// 查找直接子节点,
+    /// 返回第一个满足"节点路径相对于 self 路径开始的第一个组成部分和 `comp` 相等"的子节点.
+    pub(crate) fn find_child(&self, comp: Component) -> Option<RcRecordNode> {
+        self.children().iter()
+            // 这里假设所有的子节点的路径都是以当前节点路径为前缀且和当前节点路径不相同的.
+            .find(|child|
+                comp == child.borrow().path
+                    .strip_prefix(&self.path).unwrap()
+                    .components().next().unwrap()
+            )
+            .map(RcRecordNode::clone)
     }
 }
 
@@ -512,7 +477,6 @@ impl SpaceDistribution {
     ///
     /// - `depth` 表示当前节点的深度, 用于缩进, depth 为 1 时缩进 2 空格.
     /// - `max_depth` 表示显示的最大深度, 如果为 None, 则表示无限深度.
-    #[inline(never)]
     fn format_tree_node(node: &RcRecordNode, depth: usize, max_depth: Option<usize>) -> String {
         let mut s = String::new();
         s.push_str(&"  ".repeat(depth));
@@ -540,21 +504,88 @@ impl SpaceDistribution {
         }
         s
     }
-    
+
     pub(crate) fn total_alloc(&self) -> usize {
         self.iter_roots().map(|x| x.borrow().alloc).sum()
+    }
+
+    /// 获取各个根节点的最长公共路径前缀.
+    ///
+    /// 如果 [`SpaceDistribution`] 为空, 返回 None
+    pub fn get_common_path_prefix(&self) -> Option<PathBuf> {
+        let mut roots = self.iter_roots();
+        let root = roots.next()?;
+        let mut prefix = root.borrow().path.clone();
+        for r in roots {
+            let mut new_prefix = PathBuf::new();
+            for (a, b) in prefix.components().zip(r.borrow().path.components()) {
+                if a != b {
+                    break;
+                }
+                new_prefix.push(a);
+            }
+            prefix = new_prefix;
+        }
+        Some(prefix)
+    }
+
+    /// 查找路径和 [`path`] 的根节点.
+    pub(crate) fn find_root(&self, path: impl AsRef<Path>) -> Option<RcRecordNode> {
+        self.iter_roots()
+            .find(|r| r.borrow().path == path.as_ref())
+            .map(RcRecordNode::clone)
+    }
+
+    /// 获取指定路径(路径需要从根节点开始表示)下的节点, 如果节点不存在返回 None.
+    pub(crate) fn search_node(&self, path: impl AsRef<Path>) -> Option<RcRecordNode> {
+        let path = path.as_ref();
+        let mut cur_path = PathBuf::from("");
+        let mut node: Option<RcRecordNode> = None;
+        for comp in path.components() {
+            match comp {
+                Component::CurDir => (),
+                Component::ParentDir | Component::Normal(_) | Component::Prefix(_) => {
+                    // 更新 cur_path
+                    match comp {
+                        Component::ParentDir => { cur_path.pop(); }
+                        Component::CurDir => continue,
+                        _ => { cur_path.push(comp); }
+                    }
+                    if node.is_some() {
+                        if comp == Component::ParentDir {
+                            node = node.unwrap().borrow().parent();
+                        } else {
+                            node = node.unwrap().borrow().find_child(comp)
+                        }
+                    } else {
+                        node = self.find_root(&cur_path);
+                    }
+                }
+                Component::RootDir => {
+                    cur_path.push(comp);
+                }
+            }
+        }
+        #[cfg(test)]
+        {
+            if let Some(node) = &node {
+                assert_eq!(node.borrow().path, cur_path); // cur_path 是标准化的参数 path
+            }
+        }
+        node
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
     use super::*;
+    use std::path::PrefixComponent;
+    use std::time::Instant;
 
     #[test]
     fn size_of() {
         assert_eq!(
-            96,
+            104,
             size_of_val(&RawRecord::default())
         );
     }
@@ -617,22 +648,6 @@ mod tests {
     }
 
     #[test]
-    fn find_direct_parent() {
-        let a = RcRecordNode::new(RecordNode::new(new_raw_record("a")));
-        let b = RecordNode::new(new_raw_record("a/b/"));
-        let c = RecordNode::new(new_raw_record("a/b/c/"));
-        let d = RecordNode::new(new_raw_record("a/b/c/d/"));
-        let e = RecordNode::new(new_raw_record("a/b/c/d/e"));
-        matches!(RecordNode::find_direct_parent(&a, &b), Some(_));
-        for node in [b, c, d, e] {
-            let option = a.find_direct_parent_of(&node);
-            option.unwrap()
-                .push_child(node);
-        }
-        dbg!(a);
-    }
-
-    #[test]
     fn format_nodes() {
         let sd = SpaceDistribution::from_ordered_records(&[
             new_raw_record("a/"),
@@ -681,5 +696,61 @@ mod tests {
         let sd = SpaceDistribution::from_unordered_csv_file("example_data/example_1.csv").unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 31.8670859s
         println!("{}", sd.format_tree(Some(1)));
+    }
+
+    #[test]
+    fn common_path_prefix() {
+        let sd = SpaceDistribution::from_ordered_records(&[
+            new_raw_record("a/b/c/d/"),
+            new_raw_record("a/b/c/f/"),
+            new_raw_record("a/b/go/g/"),
+            new_raw_record("a/b/c/h/"),
+        ]);
+        assert_eq!(sd.get_common_path_prefix().unwrap(), PathBuf::from("a/b/"));
+        #[cfg(target_os = "windows")]
+        {
+            let sd = SpaceDistribution::from_ordered_records(&[
+                new_raw_record("D:/"),
+                new_raw_record("C:/"),
+            ]);
+            assert_eq!(sd.get_common_path_prefix().unwrap(), PathBuf::from(""));
+        }
+    }
+
+    #[test]
+    fn strip_prefix_path() {
+        assert_ne!(PathBuf::from("b/c/d").strip_prefix("b/c/d/").ok(), None);
+        assert_eq!(PathBuf::from("b/c/d").strip_prefix("b/c/d/e").ok(), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn path_file_name() {
+        assert_eq!(PathBuf::from("D:/").file_name(), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn path_disk_prefix() {
+        let mut path = PathBuf::from("D:");
+        let mut comps = path.components();
+        assert!(matches!(comps.next(), Some(Component::Prefix(PrefixComponent{..}))));
+        assert!(comps.next().is_none());
+        path.push("/");
+        let mut comps = path.components();
+        assert!(matches!(comps.next(), Some(Component::Prefix(PrefixComponent{..}))));
+        assert!(matches!(comps.next(), Some(Component::RootDir)));
+        assert!(comps.next().is_none());
+        // wrong path
+        let mut path = PathBuf::from("D:");
+        path.push("a");
+        assert_eq!(path, PathBuf::from("D:a"))
+    }
+    
+    #[test]
+    fn trailing_slash_path() {
+        let slashed = Path::new("D:/");
+        let not_slashed = Path::new("D:");
+        assert_eq!(slashed, not_slashed);
     }
 }

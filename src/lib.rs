@@ -2,7 +2,6 @@ mod space_distribution;
 mod diff;
 
 use std::fmt::Debug;
-use std::fs::File;
 use std::io;
 use std::io::{BufRead, BufReader, Chain, Cursor, Read};
 use std::time::{Duration, Instant};
@@ -58,6 +57,8 @@ pub enum Error {
     /// 会归因于此.
     #[error("Csv parsing error")]
     Csv(#[from] csv::Error),
+    #[error("Error in diffing two space distribution")]
+    Diff(#[from] diff::Error),
 }
 
 /// 以一个 [`Read`] 作为内容, 创建一个 CSV Reader,
@@ -98,7 +99,8 @@ fn build_csv_reader<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::space_distribution::{RawRecord, SpaceDistribution};
+    use crate::space_distribution::RawRecord;
+    use std::fs::File;
     #[test]
     fn test_read_csv_records() {
         let start = Instant::now();
