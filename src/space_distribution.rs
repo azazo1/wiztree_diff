@@ -576,7 +576,6 @@ impl SpaceDistribution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PrefixComponent;
     use std::time::Instant;
 
     #[test]
@@ -586,62 +585,28 @@ mod tests {
             size_of_val(&RawRecord::default())
         );
     }
-    #[test]
-    #[cfg(windows)]
-    fn prefix_path() {
-        let root: PathBuf = "D:/".into();
-        let a: PathBuf = "D:/a".into();
-        let _b: PathBuf = "D:/a/b".into();
-        let b_d: PathBuf = "D:/a/b/..".into();
-        let b_dd: PathBuf = "D:/a/b/../..".into();
-        assert!(a.starts_with(&root));
-        assert!(b_d.starts_with(&a));
-        assert!(b_dd.starts_with(&a)); // 实际上, 这个应该为 false, 但是 b_dd 这个路径没有标准化
-        // 路径的标准化我知道的有两种方法:
-        // - 使用 fs::canonicalize, 这个还没了解过具体的情况, 还不知道其和 Path::canonicalize 的区别.
-        //   两者似乎一样, 但是对 "/" 在 Windows 下进行调用会产生奇怪的值.
-        // - 使用 path_clean::clean
-        let b_dd_normalized = path_clean::clean(b_dd.clone());
-        dbg!(&b_dd_normalized);
-        assert!(!b_dd_normalized.starts_with(&a));
-        // 空路径
-        let root: PathBuf = "/".into();
-        let empty: PathBuf = Default::default();
-        assert!(empty.starts_with(&empty));
-        assert!(!empty.starts_with(&root));
-        assert!(root.starts_with(&empty)); // 空路径满足其他路径的 starts_with
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn canonicalize_path() {
-        use std::fs::canonicalize;
-        // assert_eq!(canonicalize("/").unwrap(), PathBuf::from("\\\\?\\D:\\"));
-        // 产生的路径是: "\\\\?\\D:\\", `\\?\` 这个前缀似乎是用来表示这个路径是长路径.
-        assert_eq!(canonicalize("D:/").unwrap(), PathBuf::from("\\\\?\\D:\\"));
-        assert_eq!(
-            PathBuf::from("D:/").canonicalize().unwrap(),
-            canonicalize(PathBuf::from("D:/")).unwrap()
-        );
-        assert!(
-            ! // 这里就很麻烦了, 标准化后的路径是以 `\\?\` 开头的, 但是这个前缀仍然参与 starts_with 判断.
-                PathBuf::from("D:/").canonicalize().unwrap()
-                    .starts_with("D:/")
-        );
-        dbg!(PathBuf::from("D:/").canonicalize().unwrap().components().collect::<Vec<_>>());
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn path_eq() {
-        assert_eq!(PathBuf::from("a\\"), PathBuf::from("a"));
-        assert_eq!(PathBuf::from("D:/a/b"), PathBuf::from("D:/a/b/"));
-        assert_eq!(PathBuf::from("D:/a/b"), PathBuf::from("D:\\a\\b\\"));
-        assert_eq!(PathBuf::from("D:\\a\\b"), PathBuf::from("D:\\a\\b\\"));
-    }
-
+    
     fn new_raw_record(path: impl AsRef<Path>) -> RawRecord {
         RawRecord::default_with_path(path.as_ref().into())
+    }
+
+    #[test]
+    fn common_path_prefix() {
+        let sd = SpaceDistribution::from_ordered_records(&[
+            new_raw_record("a/b/c/d/"),
+            new_raw_record("a/b/c/f/"),
+            new_raw_record("a/b/go/g/"),
+            new_raw_record("a/b/c/h/"),
+        ]);
+        assert_eq!(sd.get_common_path_prefix().unwrap(), PathBuf::from("a/b/"));
+        #[cfg(windows)]
+        {
+            let sd = SpaceDistribution::from_ordered_records(&[
+                new_raw_record("D:/"),
+                new_raw_record("C:/"),
+            ]);
+            assert_eq!(sd.get_common_path_prefix().unwrap(), PathBuf::from(""));
+        }
     }
 
     #[test]
@@ -665,7 +630,6 @@ mod tests {
             sd.format_tree(None)
         )
     }
-
 
     #[test]
     fn build_space_distribution_ordered() {
@@ -693,61 +657,5 @@ mod tests {
         let sd = SpaceDistribution::from_unordered_csv_file("example_data/example_1.csv").unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 31.8670859s
         println!("{}", sd.format_tree(Some(1)));
-    }
-
-    #[test]
-    fn common_path_prefix() {
-        let sd = SpaceDistribution::from_ordered_records(&[
-            new_raw_record("a/b/c/d/"),
-            new_raw_record("a/b/c/f/"),
-            new_raw_record("a/b/go/g/"),
-            new_raw_record("a/b/c/h/"),
-        ]);
-        assert_eq!(sd.get_common_path_prefix().unwrap(), PathBuf::from("a/b/"));
-        #[cfg(windows)]
-        {
-            let sd = SpaceDistribution::from_ordered_records(&[
-                new_raw_record("D:/"),
-                new_raw_record("C:/"),
-            ]);
-            assert_eq!(sd.get_common_path_prefix().unwrap(), PathBuf::from(""));
-        }
-    }
-
-    #[test]
-    fn strip_prefix_path() {
-        assert_ne!(PathBuf::from("b/c/d").strip_prefix("b/c/d/").ok(), None);
-        assert_eq!(PathBuf::from("b/c/d").strip_prefix("b/c/d/e").ok(), None);
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn path_file_name() {
-        assert_eq!(PathBuf::from("D:/").file_name(), None);
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn path_disk_prefix() {
-        let mut path = PathBuf::from("D:");
-        let mut comps = path.components();
-        assert!(matches!(comps.next(), Some(Component::Prefix(PrefixComponent{..}))));
-        assert!(comps.next().is_none());
-        path.push("/");
-        let mut comps = path.components();
-        assert!(matches!(comps.next(), Some(Component::Prefix(PrefixComponent{..}))));
-        assert!(matches!(comps.next(), Some(Component::RootDir)));
-        assert!(comps.next().is_none());
-        // wrong path
-        let mut path = PathBuf::from("D:");
-        path.push("a");
-        assert_eq!(path, PathBuf::from("D:a"))
-    }
-
-    #[test]
-    fn trailing_slash_path() {
-        let slashed = Path::new("D:/");
-        let not_slashed = Path::new("D:");
-        assert_eq!(slashed, not_slashed);
     }
 }

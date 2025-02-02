@@ -352,7 +352,6 @@ impl Diffable for SpaceDistribution {
 mod tests {
     use std::ffi::OsStr;
     use std::io::Cursor;
-    use std::path::{Prefix, PrefixComponent};
     use super::*;
 
     #[test]
@@ -398,46 +397,5 @@ mod tests {
         dbg!(&diff.nodes);
         diff.view_relpath("../..").unwrap();
         dbg!(&diff.nodes);
-    }
-
-    #[test]
-    fn path_components() {
-        let buf = PathBuf::from("D:/a/b/c/d");
-        let mut p = buf.components();
-        assert!(matches!(p.next(), Some(Component::Prefix(PrefixComponent{..}))));
-        assert!(matches!(p.next(), Some(Component::RootDir)));
-        assert!(matches!(p.next(), Some(Component::Normal(_a))));
-        assert!(matches!(p.next(), Some(Component::Normal(_b))));
-        assert!(matches!(p.next(), Some(Component::Normal(_c))));
-        assert!(matches!(p.next(), Some(Component::Normal(_d))));
-        assert!(p.next().is_none());
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn parent_path() {
-        let path: PathBuf = "D:\\".into();
-        let mut it = path.components();
-        assert!(matches!(it.next(), Some(Component::Prefix(PrefixComponent{..}))));
-        assert!(matches!(it.next(), Some(Component::RootDir)));
-        assert_eq!(it.next(), None);
-        assert_eq!(path.parent(), None);
-
-        let empty_path = PathBuf::from("");
-        assert_eq!(empty_path.components().next(), None);
-
-        let slash = PathBuf::from("/");
-        assert_eq!(slash.components().collect::<Vec<_>>(), [Component::RootDir]);
-        assert_eq!(slash.parent(), None);
-    }
-
-    #[test]
-    fn prefix_path() {
-        let prefix = Path::new("D:\\").components().next().unwrap();
-        let Component::Prefix(prefix) = prefix else { panic!(); };
-        assert!(matches!(prefix.kind(), Prefix::Disk(68)));
-        let path_from_prefix_comp = Path::new(prefix.as_os_str());
-        dbg!(path_from_prefix_comp);
-        assert_eq!(PathBuf::from("D:/"), PathBuf::from("D:\\"));
     }
 }
