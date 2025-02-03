@@ -11,6 +11,8 @@ pub enum Error {
     BothNone,
     #[error("Path between two node are in different paths")]
     PathNEqual,
+    #[error("Node type mismatch, one is folder, the other is file")]
+    TypeMismatch,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -26,7 +28,8 @@ pub enum DiffKind {
 /// 用于比较一对相同路径的文件夹或者文件的节点
 pub struct DiffNode {
     kind: DiffKind,
-    // todo 当一个节点原来是文件夹后来变成文件或者反之, 支持这种情况.
+    path: Option<PathBuf>,
+    folder: bool,
     delta_size: isize,
     delta_alloc: isize,
     delta_n_files: isize,
@@ -51,6 +54,8 @@ impl fmt::Debug for DiffNode {
 
         f.debug_struct("DiffNode")
             .field("kind", &self.kind)
+            .field("path", &self.path)
+            .field("is_folder", &self.folder)
             .field("delta_size", &self.delta_size)
             .field("delta_alloc", &self.delta_alloc)
             .field("delta_n_files", &self.delta_n_files)
@@ -74,11 +79,13 @@ impl DiffNode {
     /// - 如果两个节点都为 None, 返回 None.
     /// - 如果两个节点的路径不同, 返回 None.
     fn new(newer_side_node: Option<RcRecordNode>, older_side_node: Option<RcRecordNode>) -> Result<Self, Error> {
-        let (kind, delta_size, delta_alloc, delta_n_files, delta_n_folders) = match (&newer_side_node, &older_side_node) {
+        let (kind, path, folder, delta_size, delta_alloc, delta_n_files, delta_n_folders) = match (&newer_side_node, &older_side_node) {
             (Some(new), None) => {
                 let new = new.borrow();
                 (
                     DiffKind::New,
+                    Some(new.path.clone()),
+                    new.folder,
                     new.size as isize,
                     new.alloc as isize,
                     new.n_files as isize,
@@ -89,30 +96,39 @@ impl DiffNode {
                 let old = old.borrow();
                 (
                     DiffKind::Removed,
+                    Some(old.path.clone()),
+                    old.folder,
                     -(old.size as isize),
                     -(old.alloc as isize),
                     -(old.n_files as isize),
                     -(old.n_folders as isize)
                 )
             }
-            // todo 判断文件夹文件变化情况
             (Some(new), Some(old)) => {
                 let new = new.borrow();
                 let old = old.borrow();
-                if new.path == old.path {
+                if new.folder != old.folder {
+                    return Err(Error::TypeMismatch);
+                } else if new.path != old.path {
+                    return Err(Error::PathNEqual);
+                } else {
                     (
                         DiffKind::Changed,
+                        Some(new.path.clone()),
+                        new.folder,
                         new.size as isize - old.alloc as isize,
                         new.alloc as isize - old.alloc as isize,
                         new.n_files as isize - old.n_files as isize,
                         new.n_folders as isize - old.n_folders as isize
                     )
-                } else { return Err(Error::PathNEqual); }
+                }
             }
             (None, None) => return Err(Error::BothNone)
         };
         Ok(DiffNode {
             kind,
+            path,
+            folder,
             delta_size,
             delta_alloc,
             delta_n_files,
@@ -125,6 +141,8 @@ impl DiffNode {
     fn dummy() -> DiffNode {
         DiffNode {
             kind: DiffKind::Changed,
+            path: None,
+            folder: true,
             delta_size: 0,
             delta_alloc: 0,
             delta_n_files: 0,
@@ -136,15 +154,6 @@ impl DiffNode {
 
     pub fn is_dummy(&self) -> bool {
         self.newer_side_node.is_none() && self.older_side_node.is_none()
-    }
-
-    /// 获取当前节点表示的路径, 如果当前节点是 dummy node, 则返回 None.
-    pub fn get_path(&self) -> Option<PathBuf> {
-        self.newer_side_node.as_ref().map(
-            |node| node.borrow().path.clone()
-        ).or(self.older_side_node.as_ref().map(
-            |node| node.borrow().path.clone()
-        ))
     }
 
     /// 获取 newer_side_node 和 older_side_node 的父节点.
@@ -159,6 +168,21 @@ impl DiffNode {
          self.older_side_node.as_ref().and_then(|n| n.borrow().find_child(comp)))
     }
 
+    /// 获取当前节点表示的路径, 如果当前节点是 dummy node, 则返回 None.
+    pub fn path(&self) -> Option<PathBuf> {
+        self.path.clone()
+    }
+    
+    /// 节点是否为文件夹
+    pub fn is_folder(&self) -> bool {
+        self.folder
+    }
+    
+    /// 节点是否为文件
+    pub fn is_file(&self) -> bool {
+        !self.folder
+    }
+    
     /// 节点大小变化
     pub fn delta_size(&self) -> isize {
         self.delta_size
@@ -187,8 +211,6 @@ impl DiffNode {
 
 /// 两个 [`SpaceDistribution`] 的对比,
 /// 此结构体对两者进行借用而不拷贝数据.
-///
-/// 对 SpaceDistribution 中节点的比较是比较其分配大小, 而不是内容大小.
 #[derive(Debug)]
 pub struct Diff<'sd> {
     /// 比较中较新的 [`SpaceDistribution`]
@@ -202,7 +224,8 @@ pub struct Diff<'sd> {
     /// dummy node:
     /// - `newer_side_node` 和 `older_side_node` 都为 None
     /// - `kind` 为 [`DiffKind::Changed`],
-    /// - `delta` 为各个根节点总和大小变化.
+    /// - `path` 为 None,
+    /// - `folder` 为 true,
     current_node: DiffNode,
     /// 当前在观察的节点的子节点, Diff 构造初始时为空
     nodes: Vec<DiffNode>,
@@ -247,7 +270,12 @@ impl<'sd> Diff<'sd> {
                             newer_cur = newer_iter.next();
                         }
                         Ordering::Equal => {
-                            rst.push(DiffNode::new(Some(new), Some(old)).unwrap());
+                            if new.borrow().folder == old.borrow().folder {
+                                rst.push(DiffNode::new(Some(new), Some(old)).unwrap());
+                            } else {
+                                rst.push(DiffNode::new(Some(new), None).unwrap());
+                                rst.push(DiffNode::new(None, Some(old)).unwrap());
+                            }
                             newer_cur = newer_iter.next();
                             older_cur = older_iter.next();
                         }
@@ -272,8 +300,6 @@ impl<'sd> Diff<'sd> {
     }
 
     /// 观察对比一对新旧节点.
-    ///
-    /// 需要确保新旧节点的路径相同, 否则 panic.
     fn view_node(&mut self, newer: Option<RcRecordNode>, older: Option<RcRecordNode>) -> Result<(), Error> {
         if newer.is_none() && older.is_none() {
             return Err(Error::BothNone);
@@ -283,6 +309,8 @@ impl<'sd> Diff<'sd> {
         if let (Some(newer), Some(older)) = (&borrow_newer, &borrow_older) {
             if newer.path != older.path {
                 return Err(Error::PathNEqual);
+            } else if newer.folder != older.folder {
+                return Err(Error::TypeMismatch);
             }
         }
         self.nodes = Diff::diff_records(
@@ -299,15 +327,44 @@ impl<'sd> Diff<'sd> {
         Ok(())
     }
 
+    /// 同 [`Self::view_node`], 但是如果新旧节点类型不同, 那么观察是文件夹的那个节点.
+    fn pick_folder_to_view(&mut self, newer_node: Option<RcRecordNode>, older_node: Option<RcRecordNode>) -> Result<(), Error> {
+        match (newer_node, older_node) {
+            (Some(newer_node), Some(older_node)) => {
+                let borrow_newer = newer_node.borrow();
+                let borrow_older = older_node.borrow();
+                if borrow_newer.path != borrow_older.path {
+                    return Err(Error::PathNEqual);
+                }
+                let new_is_folder = borrow_newer.folder;
+                let old_is_folder = borrow_older.folder;
+                drop((borrow_newer, borrow_older));
+                if new_is_folder != old_is_folder { // 如果一个是文件, 一个是文件夹, 那么观察文件夹.
+                    if new_is_folder {
+                        self.view_node(Some(newer_node), None)?;
+                    } else {
+                        self.view_node(None, Some(older_node))?;
+                    }
+                    Ok(())
+                } else {
+                    self.view_node(Some(newer_node), Some(older_node))
+                }
+            }
+            (newer_node, older_node) => {
+                self.view_node(newer_node, older_node)
+            }
+        }
+    }
+
     /// 观察并 diff 指定路径 `path` 节点下的子节点,
-    /// 如果路径在观察的两个 [`SpaceDistribution`] 中都不存在, 则返回错误.
-    ///
+    /// - 如果路径在观察的两个 [`SpaceDistribution`] 中都不存在, 则返回错误.
+    /// - 如果 `path` 表示的节点在新旧其中一个 SpaceDistribution 中表示为文件, 在另一个中表示为文件夹,
+    ///   那么观察文件夹, 因为文件不可进入.
     /// - `path` 需要为完整的路径, 能够完整表示一个节点, 可以使用 `..` 或者 `.`, 但是不会解析符号链接.
     pub fn view_path(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
         let newer_node = self.newer.search_node(&path);
         let older_node = self.older.search_node(&path);
-        self.view_node(newer_node, older_node)?;
-        Ok(())
+        self.pick_folder_to_view(newer_node, older_node)
     }
 
     /// 按照 [`comp`] 改变观察路径.
@@ -317,13 +374,11 @@ impl<'sd> Diff<'sd> {
             Component::ParentDir => {
                 // 如果两个节点都有父节点, 那么由于两个节点路径相同, 父节点的路径也相同, 直接构建 DiffNode.
                 if let (Some(newer_parent), Some(older_parent)) = self.current_node.get_parents() {
-                    self.view_node(Some(newer_parent), Some(older_parent))?;
+                    self.view_node(Some(newer_parent), Some(older_parent))?; // 这里不会 TypeMismatch
                 }
-                if let Some(path) = self.current_node.get_path() {
+                if let Some(path) = self.current_node.path() {
                     if let Some(parent) = path.parent() {
-                        let newer = self.newer.search_node(parent);
-                        let older = self.older.search_node(parent);
-                        self.view_node(newer, older).unwrap_or_else(|e| self.view_roots());
+                        self.view_path(parent).unwrap_or_else(|_| self.view_roots());
                     } else {
                         self.view_roots();
                     }
@@ -353,7 +408,7 @@ impl<'sd> Diff<'sd> {
     /// # Developing Note
     /// 如果无法进入 `path`, 那么会尝试复原原来的观察状态.
     pub fn view_relpath(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
-        let raw_path = self.current_node.get_path();
+        let raw_path = self.current_node.path();
         let path = path.as_ref();
         for comp in path.components() {
             self.view_comp(comp).inspect_err(|_| {
@@ -384,7 +439,7 @@ impl<'sd> Diff<'sd> {
 
     /// 获取当前正在观察的路径, 如果当前正在观察各个根节点, 则返回 None.
     pub fn current_path(&self) -> Option<PathBuf> {
-        self.current_node.get_path()
+        self.current_node.path()
     }
 }
 
@@ -462,5 +517,23 @@ mod tests {
         dbg!(&diff.nodes);
         diff.view_relpath("../..").unwrap();
         dbg!(&diff.nodes);
+    }
+    
+    #[test]
+    #[cfg(windows)]
+    fn diff_types() {
+        const NEWER: &str = r#"
+文件名称,大小,分配,修改时间,属性,文件,文件夹
+"D:\Temp\",3536,12288,2025/01/31 21:19:30,0,0,0
+"#;
+        const OLDER: &str = r#"
+文件名称,大小,分配,修改时间,属性,文件,文件夹
+"D:\Temp",3536,12288,2025/01/31 21:19:30,0,0,0
+"#;
+        let newer = SpaceDistribution::from_csv_content(Cursor::new(NEWER)).unwrap();
+        let older = SpaceDistribution::from_csv_content(Cursor::new(OLDER)).unwrap();
+        let diff = newer.diff(&older);
+        dbg!(&diff.nodes);
+        assert_eq!(diff.nodes.len(), 2);
     }
 }
