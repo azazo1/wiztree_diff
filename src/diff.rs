@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Formatter;
 use std::path::{Component, Path, PathBuf};
-use crate::space_distribution::{RcRecordNode, SpaceDistribution};
+use crate::snapshot::{RcRecordNode, Snapshot};
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -172,17 +172,17 @@ impl DiffNode {
     pub fn path(&self) -> Option<PathBuf> {
         self.path.clone()
     }
-    
+
     /// 节点是否为文件夹
     pub fn is_folder(&self) -> bool {
         self.folder
     }
-    
+
     /// 节点是否为文件
     pub fn is_file(&self) -> bool {
         !self.folder
     }
-    
+
     /// 节点大小变化
     pub fn delta_size(&self) -> isize {
         self.delta_size
@@ -209,17 +209,17 @@ impl DiffNode {
     }
 }
 
-/// 两个 [`SpaceDistribution`] 的对比,
+/// 两个 [`Snapshot`] 的对比,
 /// 此结构体对两者进行借用而不拷贝数据.
 #[derive(Debug)]
-pub struct Diff<'sd> {
-    /// 比较中较新的 [`SpaceDistribution`]
-    newer: &'sd SpaceDistribution,
-    /// 比较中较旧的 [`SpaceDistribution`]
-    older: &'sd SpaceDistribution,
+pub struct Diff<'s> {
+    /// 比较中较新的 [`Snapshot`]
+    newer: &'s Snapshot,
+    /// 比较中较旧的 [`Snapshot`]
+    older: &'s Snapshot,
     /// 当前在观察的节点.
     ///
-    /// Diff 构造初始时为 dummy node, 表示比较两个 SpaceDistribution 的各个根节点.
+    /// Diff 构造初始时为 dummy node, 表示比较两个 Snapshot 的各个根节点.
     ///
     /// dummy node:
     /// - `newer_side_node` 和 `older_side_node` 都为 None
@@ -231,8 +231,8 @@ pub struct Diff<'sd> {
     nodes: Vec<DiffNode>,
 }
 
-impl<'sd> Diff<'sd> {
-    pub fn new(newer: &'sd SpaceDistribution, older: &'sd SpaceDistribution) -> Diff<'sd> {
+impl<'s> Diff<'s> {
+    pub fn new(newer: &'s Snapshot, older: &'s Snapshot) -> Diff<'s> {
         let mut diff = Diff {
             newer,
             older,
@@ -243,7 +243,7 @@ impl<'sd> Diff<'sd> {
         diff
     }
 
-    fn diff_records(newer: impl Iterator<Item=&'sd RcRecordNode>, older: impl Iterator<Item=&'sd RcRecordNode>) -> Vec<DiffNode> {
+    fn diff_records(newer: impl Iterator<Item=&'s RcRecordNode>, older: impl Iterator<Item=&'s RcRecordNode>) -> Vec<DiffNode> {
         let mut newer: Vec<_> = newer.collect();
         let mut older: Vec<_> = older.collect();
         // 可能这里的排序会导致性能问题, 但是这里应该是非热点代码.
@@ -356,8 +356,8 @@ impl<'sd> Diff<'sd> {
     }
 
     /// 观察并 diff 指定路径 `path` 节点下的子节点,
-    /// - 如果路径在观察的两个 [`SpaceDistribution`] 中都不存在, 则返回错误.
-    /// - 如果 `path` 表示的节点在新旧其中一个 SpaceDistribution 中表示为文件, 在另一个中表示为文件夹,
+    /// - 如果路径在观察的两个 [`Snapshot`] 中都不存在, 则返回错误.
+    /// - 如果 `path` 表示的节点在新旧其中一个 Snapshot 中表示为文件, 在另一个中表示为文件夹,
     ///   那么观察文件夹, 因为文件不可进入.
     /// - `path` 需要为完整的路径, 能够完整表示一个节点, 可以使用 `..` 或者 `.`, 但是不会解析符号链接.
     pub fn view_path(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
@@ -421,7 +421,7 @@ impl<'sd> Diff<'sd> {
         Ok(())
     }
 
-    /// 观察 diff [`SpaceDistribution`] 的各个根节点, 这是最顶层的观察.
+    /// 观察 diff [`Snapshot`] 的各个根节点, 这是最顶层的观察.
     pub fn view_roots(&mut self) {
         self.current_node = DiffNode::dummy();
         self.current_node.delta_size = self.newer.total_size() as isize - self.older.total_size() as isize;
@@ -450,11 +450,11 @@ pub trait Diffable {
     fn diff<'a>(&'a self, other: &'a Self) -> Self::DiffResult<'a>;
 }
 
-impl Diffable for SpaceDistribution {
-    type DiffResult<'sd> = Diff<'sd>;
+impl Diffable for Snapshot {
+    type DiffResult<'s> = Diff<'s>;
 
-    /// 以 other 作为基底, self 作为变化, 比较两个 [`SpaceDistribution`]
-    fn diff<'sd>(&'sd self, other: &'sd Self) -> Self::DiffResult<'sd> {
+    /// 以 other 作为基底, self 作为变化, 比较两个 [`Snapshot`]
+    fn diff<'s>(&'s self, other: &'s Self) -> Self::DiffResult<'s> {
         Diff::new(self, other)
     }
 }
@@ -469,7 +469,7 @@ mod tests {
     fn size_of() {
         assert_eq!(
             std::mem::size_of::<DiffNode>(),
-            56
+            88
         );
     }
 
@@ -498,8 +498,8 @@ mod tests {
 "D:\Temp\Temp\a\fruit\other\",0,0,2025/01/31 21:24:30,16,0,0
 "D:\Temp\Temp\a\fruit\apple.txt",3,0,2025/01/31 21:28:22,32,0,0
 "#;
-        let older = SpaceDistribution::from_csv_content(Cursor::new(OLDER)).unwrap();
-        let newer = SpaceDistribution::from_csv_content(Cursor::new(NEWER)).unwrap();
+        let older = Snapshot::from_csv_content(Cursor::new(OLDER)).unwrap();
+        let newer = Snapshot::from_csv_content(Cursor::new(NEWER)).unwrap();
         let mut diff = newer.diff(&older);
         assert_eq!(diff.current_node.delta_alloc, -4096);
         assert_eq!(diff.nodes.len(), 1);
@@ -517,7 +517,7 @@ mod tests {
         diff.view_relpath("../..").unwrap();
         dbg!(&diff.nodes);
     }
-    
+
     #[test]
     #[cfg(windows)]
     fn diff_types() {
@@ -529,8 +529,8 @@ mod tests {
 文件名称,大小,分配,修改时间,属性,文件,文件夹
 "D:\Temp",3536,12288,2025/01/31 21:19:30,0,0,0
 "#;
-        let newer = SpaceDistribution::from_csv_content(Cursor::new(NEWER)).unwrap();
-        let older = SpaceDistribution::from_csv_content(Cursor::new(OLDER)).unwrap();
+        let newer = Snapshot::from_csv_content(Cursor::new(NEWER)).unwrap();
+        let older = Snapshot::from_csv_content(Cursor::new(OLDER)).unwrap();
         let diff = newer.diff(&older);
         dbg!(&diff.nodes);
         assert_eq!(diff.nodes.len(), 2);

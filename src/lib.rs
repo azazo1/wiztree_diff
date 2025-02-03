@@ -1,9 +1,9 @@
 // 虽然代码部分做了 linux 适配, 但是 wiztree 是不支持 linux 的.
-mod space_distribution;
+mod snapshot;
 mod diff;
 
 pub use diff::{Diff, DiffKind, Diffable, DiffNode};
-pub use space_distribution::{SpaceDistribution};
+pub use snapshot::{Snapshot};
 
 use std::fmt::Debug;
 use std::io;
@@ -61,7 +61,7 @@ fn build_csv_reader<R: Read>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::space_distribution::RawRecord;
+    use crate::snapshot::RawRecord;
     use std::fs::File;
     use std::time::{Duration, Instant};
 

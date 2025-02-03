@@ -12,7 +12,7 @@ use std::path;
 use std::path::{Component, Path, PathBuf};
 use std::rc::{Rc, Weak};
 
-/// 一个 Record 记录了一个文件(夹)的基本信息.
+/// 一个 [`RawRecord`] 记录了一个文件(夹)的基本信息.
 /// 对应一个 WizTree 导出的 csv 文件的一行.
 #[derive(Default, Debug, Clone)]
 pub(crate) struct RawRecord {
@@ -191,7 +191,7 @@ impl AsRef<Rc<RefCell<RecordNode>>> for RcRecordNode {
     }
 }
 
-/// 一个记录节点, 用于构建 [`SpaceDistribution`] 文件树.
+/// 一个记录节点, 用于构建 [`Snapshot`] 文件树.
 #[derive(Debug)]
 pub(crate) struct RecordNode {
     raw_record: RawRecord,
@@ -254,12 +254,12 @@ impl RecordNode {
     /// 将节点 child 放入 this 的直接子节点列表中, 返回对应子节点的一个强引用.
     fn push_child(this: &RcRecordNode, mut child: RecordNode) -> RcRecordNode {
         child.set_parent(this);
-        let rc = RcRecordNode(Rc::new(RefCell::new(child)));
+        let rc = RcRecordNode::new(child);
         this.borrow_mut().children.push(RcRecordNode::clone(&rc));
         rc
     }
 
-    /// 类似 [`RecordNode::push_child`], 但是参数 child 是 [`RcRecordNode`],
+    /// 类似 [`Self::push_child`], 但是参数 child 是 [`RcRecordNode`],
     /// 放入的是 child record 引用的拷贝.
     fn push_rc_child(this: &RcRecordNode, child: &RcRecordNode) {
         child.borrow_mut().set_parent(this);
@@ -280,27 +280,27 @@ impl RecordNode {
     }
 }
 
-/// 空间分布, 储存着文件信息.
+/// 空间分布快照, 储存着文件信息.
 ///
 /// 对应的是文件 WizTree 产生的一个 csv 文件.
 ///
 /// 此结构会对 csv 文件的进行树状结构的解析.
 /// 这个树状结构可能不止一个根节点.
 #[derive(Debug)]
-pub struct SpaceDistribution {
+pub struct Snapshot {
     roots: Vec<RcRecordNode>,
 }
 
-impl SpaceDistribution {
-    /// 从 [记录](RawRecord) 中构建一个 [空间分布](SpaceDistribution).
+impl Snapshot {
+    /// 从 [记录](RawRecord) 中构建一个 [空间分布快照](Snapshot).
     ///
     /// 此方法会对输入参数的所有数据进行拷贝.
     ///
     /// 此方法假定:
     /// - 原始记录数组是按照原始 csv 文件中的行顺序排列的
     ///   (wiztree 的所有排列方式都能保证子目录紧随直接父目录),
-    ///   没有进行排序过.
-    /// - RawRecord 中所有的路径都是已经解析过的, 不包含 `..` 或 `.` 或符号链接等内容.
+    ///   没有进行顺序调整过.
+    /// - RawRecord 中所有的路径都是已经标准化的, 不包含 `..` 或 `.` 或符号链接等内容.
     /// - 没有重复路径的 RawRecord.
     /// - 一个 RawRecord 的路径如果存在, 那么在它的逐级父路径对应的 RawRecord 都在它之前存在, 直到根节点.
     ///   比如:
@@ -308,13 +308,13 @@ impl SpaceDistribution {
     ///   > 那么 `/a/b/c` 和 `/a/b` 一定存在且在 `/a/b/c/d` 之前.
     ///
     /// 如果传入已经排序过的记录, 会产生错误地结果,
-    /// 此时应该使用性能较劣的 [`SpaceDistribution::from_unordered_records`]
+    /// 此时应该使用性能较劣的 [`Snapshot::from_unordered_records`]
     /// 以获得正确的输出.
-    fn from_ordered_records(records: &[RawRecord]) -> SpaceDistribution {
+    fn from_ordered_records(records: &[RawRecord]) -> Snapshot {
         if records.is_empty() {
-            return SpaceDistribution { roots: Vec::new() }; // 空值
+            return Snapshot { roots: Vec::new() }; // 空值
         }
-        let mut sd = SpaceDistribution { roots: Vec::new() };
+        let mut sd = Snapshot { roots: Vec::new() };
         let mut cur_rec = sd.push_root(
             RecordNode::new(records[0].clone()) // 第一个 record 一定是根目录之一.
         );
@@ -339,7 +339,7 @@ impl SpaceDistribution {
         sd
     }
 
-    /// 从 [记录](RawRecord) 中构建一个 [空间分布](SpaceDistribution).
+    /// 从 [记录](RawRecord) 中构建一个 [空间分布快照](Snapshot).
     ///
     /// 此方法会对输入参数的所有数据进行拷贝.
     ///
@@ -348,8 +348,8 @@ impl SpaceDistribution {
     /// - 没有重复路径的 RawRecord.
     ///
     /// 此方法允许输入 records 数组是乱序的,
-    /// 但是性能相比 [`SpaceDistribution::from_ordered_records`] 较差.
-    fn from_unordered_records(records: &[RawRecord]) -> SpaceDistribution {
+    /// 但是性能相比 [`Snapshot::from_ordered_records`] 较差.
+    fn from_unordered_records(records: &[RawRecord]) -> Snapshot {
         let mut roots = Vec::new();
         // 一次全量拷贝
         let records_set: HashSet<_> = records.iter()
@@ -379,29 +379,29 @@ impl SpaceDistribution {
                 roots.push(RcRecordNode::clone(node));
             }
         }
-        SpaceDistribution { roots }
+        Snapshot { roots }
     }
 
-    /// 从 csv 文件中构建 [`SpaceDistribution`].
+    /// 从 csv 文件中构建 [`Snapshot`].
     ///
     /// csv 文件内容需要是从 WizTree 从文件中直接导出(WizTree 内部排序任意皆可)而不经过任何顺序调整的.
-    pub fn from_csv_file(file: impl AsRef<Path>) -> Result<SpaceDistribution, Error> {
+    pub fn from_csv_file(file: impl AsRef<Path>) -> Result<Snapshot, Error> {
         Self::from_csv_content(File::open(file)?)
     }
 
-    /// 从 csv 文件中构建 [`SpaceDistribution`].
+    /// 从 csv 文件中构建 [`Snapshot`].
     ///
     /// 同 [`Self::from_ordered_records`], 但是在牺牲性能的情况下允许 csv 的各行记录允许被打乱.
-    pub fn from_unordered_csv_file(file: impl AsRef<Path>) -> Result<SpaceDistribution, Error> {
+    pub fn from_unordered_csv_file(file: impl AsRef<Path>) -> Result<Snapshot, Error> {
         Self::from_unordered_csv_content(File::open(file)?)
     }
 
-    pub fn from_csv_content(csv_content: impl Read) -> Result<SpaceDistribution, Error> {
+    pub fn from_csv_content(csv_content: impl Read) -> Result<Snapshot, Error> {
         let records = Self::records_from_csv_content(csv_content)?;
         Ok(Self::from_ordered_records(&records))
     }
 
-    pub fn from_unordered_csv_content(csv_content: impl Read) -> Result<SpaceDistribution, Error> {
+    pub fn from_unordered_csv_content(csv_content: impl Read) -> Result<Snapshot, Error> {
         let records = Self::records_from_csv_content(csv_content)?;
         Ok(Self::from_unordered_records(&records))
     }
@@ -463,7 +463,7 @@ impl SpaceDistribution {
                 }
                 None | Some(_) => {
                     for child in root.children() {
-                        s.push_str(&SpaceDistribution::format_tree_node(
+                        s.push_str(&Snapshot::format_tree_node(
                             child, 1, max_depth,
                         ))
                     }
@@ -498,7 +498,7 @@ impl SpaceDistribution {
             }
             None | Some(_) => {
                 for child in node.children() {
-                    s.push_str(&SpaceDistribution::format_tree_node(child, depth + 1, max_depth));
+                    s.push_str(&Snapshot::format_tree_node(child, depth + 1, max_depth));
                 }
             }
         }
@@ -527,7 +527,7 @@ impl SpaceDistribution {
 
     /// 获取各个根节点的最长公共路径前缀.
     ///
-    /// 如果 [`SpaceDistribution`] 为空, 返回 None
+    /// 如果 [`Snapshot`] 为空, 返回 None
     pub fn get_common_path_prefix(&self) -> Option<PathBuf> {
         let mut roots = self.iter_roots();
         let root = roots.next()?;
@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn common_path_prefix() {
-        let sd = SpaceDistribution::from_ordered_records(&[
+        let sd = Snapshot::from_ordered_records(&[
             new_raw_record("a/b/c/d/"),
             new_raw_record("a/b/c/f/"),
             new_raw_record("a/b/go/g/"),
@@ -617,7 +617,7 @@ mod tests {
         assert_eq!(sd.get_common_path_prefix().unwrap(), PathBuf::from("a/b/"));
         #[cfg(windows)]
         {
-            let sd = SpaceDistribution::from_ordered_records(&[
+            let sd = Snapshot::from_ordered_records(&[
                 new_raw_record("D:/"),
                 new_raw_record("C:/"),
             ]);
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn format_nodes() {
-        let sd = SpaceDistribution::from_ordered_records(&[
+        let sd = Snapshot::from_ordered_records(&[
             new_raw_record("a/"),
             new_raw_record("a/b/"),
             new_raw_record("a/b/c/"),
@@ -648,29 +648,29 @@ mod tests {
     }
 
     #[test]
-    fn build_space_distribution_ordered() {
-        let sd = SpaceDistribution::from_csv_file("example_data/example_small_partial.csv").unwrap();
+    fn build_snapshot_ordered() {
+        let sd = Snapshot::from_csv_file("example_data/example_small_partial.csv").unwrap();
         println!("{}", sd.format_tree(None));
     }
 
     #[test]
-    fn bench_build_space_distribution_ordered_records() {
+    fn bench_build_snapshot_ordered_records() {
         let start = Instant::now();
-        let sd = SpaceDistribution::from_csv_file("example_data/example_1.csv").unwrap();
+        let sd = Snapshot::from_csv_file("example_data/example_1.csv").unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 10.5s (260w记录)
         println!("{}", sd.format_tree(Some(1)));
     }
 
     #[test]
     fn build_sd_from_unordered_csv() {
-        let sd = SpaceDistribution::from_unordered_csv_file("example_data/example_multi_roots.csv").unwrap();
+        let sd = Snapshot::from_unordered_csv_file("example_data/example_multi_roots.csv").unwrap();
         println!("{}", sd.format_tree(None));
     }
 
     #[test]
     fn bench_build_space_distribution_unordered_records() {
         let start = Instant::now();
-        let sd = SpaceDistribution::from_unordered_csv_file("example_data/example_1.csv").unwrap();
+        let sd = Snapshot::from_unordered_csv_file("example_data/example_1.csv").unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 31.8670859s
         println!("{}", sd.format_tree(Some(1)));
     }

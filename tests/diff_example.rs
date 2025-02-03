@@ -1,11 +1,11 @@
-use wiztree_diff::{Diff, SpaceDistribution};
+use wiztree_diff::{Diff, Snapshot};
 
 #[test]
 #[cfg(windows)]
 fn main() {
-    let sd_older = SpaceDistribution::from_csv_file("example_data/example_1.csv").unwrap();
-    let sd_newer = SpaceDistribution::from_csv_file("example_data/example_2.csv").unwrap();
-    let mut diff = Diff::new(&sd_newer, &sd_older);
+    let ss_older = Snapshot::from_csv_file("example_data/example_1.csv").unwrap();
+    let ss_newer = Snapshot::from_csv_file("example_data/example_2.csv").unwrap();
+    let mut diff = Diff::new(&ss_newer, &ss_older);
     assert_eq!(diff.current_path(), None);
     dbg!(diff.nodes());
     diff.view_path("D:/").unwrap();
