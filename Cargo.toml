@@ -2,6 +2,7 @@
 name = "wiztree_diff"
 version = "0.1.0"
 edition = "2021"
+authors = ["azazo1"]
 
 [lib]
 name = "wiztree_diff"
