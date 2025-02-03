@@ -246,8 +246,7 @@ impl<'sd> Diff<'sd> {
     fn diff_records(newer: impl Iterator<Item=&'sd RcRecordNode>, older: impl Iterator<Item=&'sd RcRecordNode>) -> Vec<DiffNode> {
         let mut newer: Vec<_> = newer.collect();
         let mut older: Vec<_> = older.collect();
-        // todo 检查性能损耗
-        // 可能这里的排序会导致性能问题
+        // 可能这里的排序会导致性能问题, 但是这里应该是非热点代码.
         fn cmp(a: &&RcRecordNode, b: &&RcRecordNode) -> Ordering {
             // 可能这里的 borrow 会导致性能问题
             a.borrow().path.cmp(&b.borrow().path)
@@ -262,8 +261,8 @@ impl<'sd> Diff<'sd> {
         loop {
             match (newer_cur, older_cur) {
                 (Some(new), Some(old)) => {
-                    let new = RcRecordNode::clone(&new);
-                    let old = RcRecordNode::clone(&old);
+                    let new = RcRecordNode::clone(new);
+                    let old = RcRecordNode::clone(old);
                     match cmp(&&new, &&old) {
                         Ordering::Less => {
                             rst.push(DiffNode::new(Some(new), None).unwrap());
@@ -286,11 +285,11 @@ impl<'sd> Diff<'sd> {
                     }
                 }
                 (Some(new), None) => {
-                    rst.push(DiffNode::new(Some(RcRecordNode::clone(&new)), None).unwrap());
+                    rst.push(DiffNode::new(Some(RcRecordNode::clone(new)), None).unwrap());
                     newer_cur = newer_iter.next();
                 }
                 (None, Some(old)) => {
-                    rst.push(DiffNode::new(None, Some(RcRecordNode::clone(&old))).unwrap());
+                    rst.push(DiffNode::new(None, Some(RcRecordNode::clone(old))).unwrap());
                     older_cur = older_iter.next();
                 }
                 (None, None) => break
