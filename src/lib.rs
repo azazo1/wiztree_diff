@@ -1,7 +1,7 @@
 mod space_distribution;
 mod diff;
 
-pub use diff::{Diff, DiffKind, Diffable};
+pub use diff::{Diff, DiffKind, Diffable, DiffNode};
 pub use space_distribution::{SpaceDistribution};
 
 use std::fmt::Debug;
