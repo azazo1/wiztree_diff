@@ -19,15 +19,18 @@ pub enum DiffKind {
     New,
     /// 节点删除
     Removed,
-    /// 节点大小变化
-    SizeChanged,
+    /// 节点变化
+    Changed,
 }
 
 /// 用于比较一对相同路径的文件夹或者文件的节点
 pub struct DiffNode {
     kind: DiffKind,
-    /// 节点大小变化的字节数, 参考的是节点的分配大小而不是内容大小.
-    delta: isize,
+    // todo 当一个节点原来是文件夹后来变成文件或者反之, 支持这种情况.
+    delta_size: isize,
+    delta_alloc: isize,
+    delta_n_files: isize,
+    delta_n_folders: isize,
     // newer_side_node 和 older_side_node 同时为 None 时是 dummy_node.
     // newer_side_node 和 older_side_Node 同时为 Some 时, 它们的 path 相同.
     newer_side_node: Option<RcRecordNode>,
@@ -48,7 +51,10 @@ impl fmt::Debug for DiffNode {
 
         f.debug_struct("DiffNode")
             .field("kind", &self.kind)
-            .field("delta", &self.delta)
+            .field("delta_size", &self.delta_size)
+            .field("delta_alloc", &self.delta_alloc)
+            .field("delta_n_files", &self.delta_n_files)
+            .field("delta_n_dirs", &self.delta_n_folders)
             .field("newer_side_node", &DebugOption(
                 self.newer_side_node.as_ref().map(
                     |node| node.borrow().path.to_string_lossy().to_string()
@@ -68,26 +74,61 @@ impl DiffNode {
     /// - 如果两个节点都为 None, 返回 None.
     /// - 如果两个节点的路径不同, 返回 None.
     fn new(newer_side_node: Option<RcRecordNode>, older_side_node: Option<RcRecordNode>) -> Result<Self, Error> {
-        let (kind, delta) = match (&newer_side_node, &older_side_node) {
-            (Some(new), None) => (DiffKind::New, new.borrow().alloc as isize),
-            (None, Some(old)) => (DiffKind::Removed, -(old.borrow().alloc as isize)),
-            (Some(new), Some(old)) => if new.borrow().path == old.borrow().path {
-                (DiffKind::SizeChanged, new.borrow().alloc as isize - old.borrow().alloc as isize)
-            } else { return Err(Error::PathNEqual); },
+        let (kind, delta_size, delta_alloc, delta_n_files, delta_n_folders) = match (&newer_side_node, &older_side_node) {
+            (Some(new), None) => {
+                let new = new.borrow();
+                (
+                    DiffKind::New,
+                    new.size as isize,
+                    new.alloc as isize,
+                    new.n_files as isize,
+                    new.n_folders as isize
+                )
+            }
+            (None, Some(old)) => {
+                let old = old.borrow();
+                (
+                    DiffKind::Removed,
+                    -(old.size as isize),
+                    -(old.alloc as isize),
+                    -(old.n_files as isize),
+                    -(old.n_folders as isize)
+                )
+            }
+            // todo 判断文件夹文件变化情况
+            (Some(new), Some(old)) => {
+                let new = new.borrow();
+                let old = old.borrow();
+                if new.path == old.path {
+                    (
+                        DiffKind::Changed,
+                        new.size as isize - old.alloc as isize,
+                        new.alloc as isize - old.alloc as isize,
+                        new.n_files as isize - old.n_files as isize,
+                        new.n_folders as isize - old.n_folders as isize
+                    )
+                } else { return Err(Error::PathNEqual); }
+            }
             (None, None) => return Err(Error::BothNone)
         };
         Ok(DiffNode {
             kind,
-            delta,
+            delta_size,
+            delta_alloc,
+            delta_n_files,
+            delta_n_folders,
             newer_side_node,
             older_side_node,
         })
     }
 
-    fn dummy(delta: isize) -> DiffNode {
+    fn dummy() -> DiffNode {
         DiffNode {
-            kind: DiffKind::SizeChanged,
-            delta,
+            kind: DiffKind::Changed,
+            delta_size: 0,
+            delta_alloc: 0,
+            delta_n_files: 0,
+            delta_n_folders: 0,
             newer_side_node: None,
             older_side_node: None,
         }
@@ -118,9 +159,24 @@ impl DiffNode {
          self.older_side_node.as_ref().and_then(|n| n.borrow().find_child(comp)))
     }
 
-    /// 节点分配大小的变化字节数
-    pub fn delta(&self) -> isize {
-        self.delta
+    /// 节点大小变化
+    pub fn delta_size(&self) -> isize {
+        self.delta_size
+    }
+
+    /// 节点分配大小变化
+    pub fn delta_alloc(&self) -> isize {
+        self.delta_alloc
+    }
+
+    /// 节点文件数量变化
+    pub fn delta_n_files(&self) -> isize {
+        self.delta_n_files
+    }
+
+    /// 节点文件夹数量变化
+    pub fn delta_n_folders(&self) -> isize {
+        self.delta_n_folders
     }
 
     /// 节点变化类型
@@ -145,7 +201,7 @@ pub struct Diff<'sd> {
     ///
     /// dummy node:
     /// - `newer_side_node` 和 `older_side_node` 都为 None
-    /// - `kind` 为 [`DiffKind::SizeChanged`],
+    /// - `kind` 为 [`DiffKind::Changed`],
     /// - `delta` 为各个根节点总和大小变化.
     current_node: DiffNode,
     /// 当前在观察的节点的子节点, Diff 构造初始时为空
@@ -157,7 +213,7 @@ impl<'sd> Diff<'sd> {
         let mut diff = Diff {
             newer,
             older,
-            current_node: DiffNode::dummy(0),
+            current_node: DiffNode::dummy(),
             nodes: Vec::new(),
         };
         diff.view_roots();
@@ -313,10 +369,11 @@ impl<'sd> Diff<'sd> {
 
     /// 观察 diff [`SpaceDistribution`] 的各个根节点, 这是最顶层的观察.
     pub fn view_roots(&mut self) {
-        self.current_node = DiffNode::dummy(
-            self.newer.total_alloc() as isize
-                - self.older.total_alloc() as isize
-        );
+        self.current_node = DiffNode::dummy();
+        self.current_node.delta_size = self.newer.total_size() as isize - self.older.total_size() as isize;
+        self.current_node.delta_alloc = self.newer.total_alloc() as isize - self.older.total_alloc() as isize;
+        self.current_node.delta_n_files = self.newer.total_n_files() as isize - self.older.total_n_files() as isize;
+        self.current_node.delta_n_folders = self.newer.total_n_folders() as isize - self.older.total_n_folders() as isize;
         self.nodes = Diff::diff_records(self.newer.iter_roots(), self.older.iter_roots());
     }
 
@@ -355,6 +412,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn size_of() {
+        assert_eq!(
+            std::mem::size_of::<DiffNode>(),
+            56
+        );
+    }
+
+    #[test]
     #[cfg(windows)]
     fn build_diff() {
         const OLDER: &str = r#"
@@ -382,9 +447,9 @@ mod tests {
         let older = SpaceDistribution::from_csv_content(Cursor::new(OLDER)).unwrap();
         let newer = SpaceDistribution::from_csv_content(Cursor::new(NEWER)).unwrap();
         let mut diff = newer.diff(&older);
-        assert_eq!(diff.current_node.delta, -4096);
+        assert_eq!(diff.current_node.delta_alloc, -4096);
         assert_eq!(diff.nodes.len(), 1);
-        assert_eq!(diff.nodes[0].delta, -4096);
+        assert_eq!(diff.nodes[0].delta_alloc, -4096);
         diff.view_path("D:/Temp/Temp/a").unwrap();
         dbg!(&diff.nodes);
         diff.view_path("D:/Temp/Temp/a/fruit/./..").unwrap();

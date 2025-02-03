@@ -505,8 +505,24 @@ impl SpaceDistribution {
         s
     }
 
-    pub(crate) fn total_alloc(&self) -> usize {
+    /// 获取所有根节点的分配大小总和.
+    pub fn total_alloc(&self) -> usize {
         self.iter_roots().map(|x| x.borrow().alloc).sum()
+    }
+
+    /// 获取所有根节点的大小总和.
+    pub fn total_size(&self) -> usize {
+        self.iter_roots().map(|x| x.borrow().size).sum()
+    }
+
+    /// 获取所有根节点的文件数量总和.
+    pub fn total_n_files(&self) -> usize {
+        self.iter_roots().map(|x| x.borrow().n_files).sum()
+    }
+
+    /// 获取所有根节点的文件夹数量总和.
+    pub fn total_n_folders(&self) -> usize {
+        self.iter_roots().map(|x| x.borrow().n_folders).sum()
     }
 
     /// 获取各个根节点的最长公共路径前缀.
@@ -585,7 +601,7 @@ mod tests {
             size_of_val(&RawRecord::default())
         );
     }
-    
+
     fn new_raw_record(path: impl AsRef<Path>) -> RawRecord {
         RawRecord::default_with_path(path.as_ref().into())
     }

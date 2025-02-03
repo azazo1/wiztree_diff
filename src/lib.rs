@@ -1,3 +1,4 @@
+// 虽然代码部分做了 linux 适配, 但是 wiztree 是不支持 linux 的.
 mod space_distribution;
 mod diff;
 
