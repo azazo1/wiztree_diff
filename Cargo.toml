@@ -24,4 +24,4 @@ harness = false
 [features]
 default = []
 # 启用则 Snapshot 使用 Arc 而不是 Rc 构建树, 适用于多线程
-arc = []
+sync = []

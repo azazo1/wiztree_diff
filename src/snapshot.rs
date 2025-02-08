@@ -1,7 +1,6 @@
 use crate::{build_csv_reader, Error};
 use serde::de::{SeqAccess, Visitor};
 use serde::{de, Deserialize, Deserializer};
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
@@ -121,17 +120,36 @@ impl<'de> Deserialize<'de> for RawRecord {
     }
 }
 
-#[cfg(not(feature = "arc"))]
+#[cfg(not(feature = "sync"))]
 mod arc {
     pub(super) type RefCount<T> = std::rc::Rc<T>;
     pub(super) type Weak<T> = std::rc::Weak<T>;
+    pub(super) use std::cell::RefCell;
 }
-#[cfg(feature = "arc")]
+#[cfg(feature = "sync")]
 mod arc {
+    use std::ops::Deref;
+
     pub(super) type RefCount<T> = std::sync::Arc<T>;
     pub(super) type Weak<T> = std::sync::Weak<T>;
+    
+    pub struct RefCell<T: ?Sized>(std::cell::RefCell<T>);
+    unsafe impl<T: ?Sized> Sync for RefCell<T> {}
+    unsafe impl<T: ?Sized> Send for RefCell<T> {}
+    impl<T: ?Sized> Deref for RefCell<T> {
+        type Target = std::cell::RefCell<T>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+    impl<T> RefCell<T> {
+        pub(super) fn new(value: T) -> Self {
+            Self(std::cell::RefCell::new(value))
+        }
+    }
 }
-use arc::*;
+use arc::{RefCount, Weak, RefCell};
 
 /// 可以实现一个简短 Debug, Display 输出的 [`RefCount<RefCell<RecordNode>>`] 类型
 pub(crate) struct RcRecordNode(RefCount<RefCell<RecordNode>>);
