@@ -110,7 +110,7 @@ mod tests {
     fn test_read_csv_records() {
         let start = Instant::now();
         let mut reader =
-            build_csv_reader(File::open("example_data/example_1.csv").unwrap()).unwrap();
+            build_csv_reader(File::open("example_data/example_old.csv").unwrap()).unwrap();
         let mut throttle = Throttler::new(Duration::from_secs(1));
         for (i, record) in reader.records().enumerate() {
             let record = record.unwrap();

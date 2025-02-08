@@ -5,13 +5,13 @@ use std::io::{BufRead, BufReader};
 
 fn count_file_lines_buf_reader() -> usize {
     // 数 260w 行对应所有操作大约需要 360ms.
-    let buf_reader = BufReader::new(File::open("example_data/example_1.csv").unwrap());
+    let buf_reader = BufReader::new(File::open("example_data/example_old.csv").unwrap());
     buf_reader.lines().count()
 }
 
 fn count_file_lines_read_to_string() -> usize {
     // 260w rows, 152.63 ms
-    let content = fs::read_to_string("example_data/example_1.csv").unwrap();
+    let content = fs::read_to_string("example_data/example_old.csv").unwrap();
     content.lines().count()
 }
 

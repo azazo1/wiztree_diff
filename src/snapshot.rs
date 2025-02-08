@@ -132,7 +132,7 @@ mod arc {
 
     pub(super) type RefCount<T> = std::sync::Arc<T>;
     pub(super) type Weak<T> = std::sync::Weak<T>;
-    
+
     pub struct RefCell<T: ?Sized>(std::cell::RefCell<T>);
     unsafe impl<T: ?Sized> Sync for RefCell<T> {}
     unsafe impl<T: ?Sized> Send for RefCell<T> {}
@@ -321,6 +321,7 @@ pub struct Snapshot {
     roots: Vec<RcRecordNode>,
 }
 
+// todo 这些 from 方法放到 Builder 中.
 impl Snapshot {
     /// 从 [记录](RawRecord) 中构建一个 [空间分布快照](Snapshot).
     ///
@@ -754,8 +755,10 @@ pub(crate) mod builder {
                 reader, |n| {
                     current += n;
                     let whether_report: bool = match self.interval {
-                        ReportInterval::Time(duration) =>
-                            rep_time.map_or(/* 没有初始间隔 */true, |t| t.elapsed() >= duration),
+                        ReportInterval::Time(duration) => {
+                            rep_time.map_or(/* 没有初始间隔 */true,
+                                            |t| t.elapsed() >= duration)
+                        }
                         ReportInterval::Bytes(bytes) => if rep_bytes >= bytes {
                             if bytes == 0 {
                                 rep_bytes = 0;
@@ -866,7 +869,7 @@ mod tests {
     #[test]
     fn bench_build_snapshot_ordered_records() {
         let start = Instant::now();
-        let sd = Snapshot::from_csv_file("example_data/example_1.csv").unwrap();
+        let sd = Snapshot::from_csv_file("example_data/example_old.csv").unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 10.5s (260w记录)
         println!("{}", sd.format_tree(Some(1)));
     }
@@ -880,7 +883,7 @@ mod tests {
     #[test]
     fn bench_build_space_distribution_unordered_records() {
         let start = Instant::now();
-        let sd = Snapshot::from_unordered_csv_file("example_data/example_1.csv").unwrap();
+        let sd = Snapshot::from_unordered_csv_file("example_data/example_old.csv").unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 31.8670859s
         println!("{}", sd.format_tree(Some(1)));
     }
