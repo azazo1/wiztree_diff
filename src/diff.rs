@@ -483,6 +483,7 @@ impl Diff {
 mod tests {
     use std::ffi::OsStr;
     use std::io::Cursor;
+    use crate::Builder;
     use super::*;
 
     #[test]
@@ -518,8 +519,8 @@ mod tests {
 "D:\Temp\Temp\a\fruit\other\",0,0,2025/01/31 21:24:30,16,0,0
 "D:\Temp\Temp\a\fruit\apple.txt",3,0,2025/01/31 21:28:22,32,0,0
 "#;
-        let older = Snapshot::from_csv_content(Cursor::new(OLDER)).unwrap();
-        let newer = Snapshot::from_csv_content(Cursor::new(NEWER)).unwrap();
+        let older = Builder::default().build_from_content(Cursor::new(OLDER), true).unwrap();
+        let newer = Builder::default().build_from_content(Cursor::new(NEWER), true).unwrap();
         #[cfg(not(feature = "owning_diff"))]
         let mut diff = Diff::new(&newer, &older);
         #[cfg(feature = "owning_diff")]
@@ -552,8 +553,8 @@ mod tests {
 文件名称,大小,分配,修改时间,属性,文件,文件夹
 "D:\Temp",3536,12288,2025/01/31 21:19:30,0,0,0
 "#;
-        let newer = Snapshot::from_csv_content(Cursor::new(NEWER)).unwrap();
-        let older = Snapshot::from_csv_content(Cursor::new(OLDER)).unwrap();
+        let newer = Builder::default().build_from_content(Cursor::new(NEWER), true).unwrap();
+        let older = Builder::default().build_from_content(Cursor::new(OLDER), true).unwrap();
         #[cfg(not(feature = "owning_diff"))]
         let mut diff = Diff::new(&newer, &older);
         #[cfg(feature = "owning_diff")]

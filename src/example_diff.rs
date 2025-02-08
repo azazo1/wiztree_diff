@@ -1,6 +1,6 @@
 use std::io::{stdout, Write};
 use std::time::Duration;
-use wiztree_diff::{Builder, Diff, Message, ReportInterval, Snapshot};
+use wiztree_diff::{Builder, Diff, Message, ReportReadingInterval, Snapshot};
 
 fn progress_bar(cur: usize, total: usize) -> String {
     const FILL: &str = "■";
@@ -20,7 +20,7 @@ fn main() {
                 stdout().flush().unwrap();
             }
         })
-        .set_report_interval(ReportInterval::Time(Duration::from_secs(1)));
+        .set_reading_report_interval(ReportReadingInterval::Time(Duration::from_secs(1)));
     let ss_older = builder.build_from_file("example_data/example_old.csv", true).unwrap();
     let ss_newer = builder.build_from_file("example_data/example_new.csv", true).unwrap();
     #[cfg(not(feature = "owning_diff"))]

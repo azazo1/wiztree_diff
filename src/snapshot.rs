@@ -1,4 +1,4 @@
-use crate::{build_csv_reader, Error};
+use crate::Error;
 use serde::de::{SeqAccess, Visitor};
 use serde::{de, Deserialize, Deserializer};
 use std::collections::HashSet;
@@ -323,146 +323,6 @@ pub struct Snapshot {
 
 // todo 这些 from 方法放到 Builder 中.
 impl Snapshot {
-    /// 从 [记录](RawRecord) 中构建一个 [空间分布快照](Snapshot).
-    ///
-    /// 此方法会对输入参数的所有数据进行拷贝.
-    ///
-    /// 此方法假定:
-    /// - 原始记录数组是按照原始 csv 文件中的行顺序排列的
-    ///   (wiztree 的所有排列方式都能保证子目录紧随直接父目录),
-    ///   没有进行顺序调整过.
-    /// - RawRecord 中所有的路径都是已经标准化的, 不包含 `..` 或 `.` 或符号链接等内容.
-    /// - 没有重复路径的 RawRecord.
-    /// - 一个 RawRecord 的路径如果存在, 那么在它的逐级父路径对应的 RawRecord 都在它之前存在, 直到根节点.
-    ///   比如:
-    ///   > 如果 `/a/b/c/d` 存在, csv 中的根目录为 `/a/b`,
-    ///   > 那么 `/a/b/c` 和 `/a/b` 一定存在且在 `/a/b/c/d` 之前.
-    ///
-    /// 如果传入已经排序过的记录, 会产生错误地结果,
-    /// 此时应该使用性能较劣的 [`Snapshot::from_unordered_records`]
-    /// 以获得正确的输出.
-    fn from_ordered_records(records: &[RawRecord]) -> Snapshot {
-        if records.is_empty() {
-            return Snapshot { roots: Vec::new() }; // 空值
-        }
-        let mut sd = Snapshot { roots: Vec::new() };
-        let mut cur_rec = sd.push_root(
-            RecordNode::new(records[0].clone()) // 第一个 record 一定是根目录之一.
-        );
-        for raw_rec in &records[1..] {
-            let rec = RecordNode::new(raw_rec.clone());
-            // 不断向上查找, 直到 cur_rec 为 rec 的父目录.
-            while !rec.path.starts_with(&cur_rec.borrow().path) {
-                let Some(parent) = cur_rec.borrow().parent() else {
-                    // cur_rec 如果是根节点.
-                    break;
-                };
-                cur_rec = parent;
-            }
-            if rec.path.starts_with(&cur_rec.borrow().path) {
-                // 如果 rec 是 cur_rec 的子目录.
-                cur_rec = cur_rec.push_child(rec);
-            } else {
-                // rec 不是 cur_rec 的子目录, 此处是因为上面的 while 循环 break 了.
-                cur_rec = sd.push_root(rec);
-            }
-        }
-        sd
-    }
-
-    /// 从 [记录](RawRecord) 中构建一个 [空间分布快照](Snapshot).
-    ///
-    /// 此方法会对输入参数的所有数据进行拷贝.
-    ///
-    /// 此方法假定:
-    /// - RawRecord 中所有的路径都是已经解析过的, 不包含 `..` 或 `.` 或符号链接等内容.
-    /// - 没有重复路径的 RawRecord.
-    ///
-    /// 此方法允许输入 records 数组是乱序的,
-    /// 但是性能相比 [`Snapshot::from_ordered_records`] 较差.
-    fn from_unordered_records(records: &[RawRecord]) -> Snapshot {
-        let mut roots = Vec::new();
-        // 一次全量拷贝
-        let records_set: HashSet<_> = records.iter()
-            .map(|raw| RcRecordNode::new(RecordNode::new(raw.clone())))
-            .collect();
-        // 一次全量引用
-        let mut paths: Vec<_> = records.iter()
-            .map(|raw_rec| &raw_rec.path)
-            .collect();
-        // 逐级排序, 保证父目录在子目录之前.
-        paths.sort_unstable_by_key(|x| x.components().count());
-        for p in paths {
-            let mut has_parent = false;
-            // 创建一个临时无用节点, 用于 hash
-            // 一次对 Path 的拷贝
-            let dummy_node = RcRecordNode::new(RecordNode::new(RawRecord::default_with_path(p.into())));
-            let node = records_set.get(&dummy_node).unwrap(); // 此节点一定存在
-            if let Some(parent_p) = p.parent() {
-                // 一次对 Path 的拷贝
-                let dummy_parent_node = RcRecordNode::new(RecordNode::new(RawRecord::default_with_path(parent_p.into())));
-                if let Some(parent_node) = records_set.get(&dummy_parent_node) {
-                    parent_node.push_rc_child(node);
-                    has_parent = true;
-                }
-            };
-            if !has_parent {
-                roots.push(RcRecordNode::clone(node));
-            }
-        }
-        Snapshot { roots }
-    }
-
-    /// 从 csv 文件中构建 [`Snapshot`].
-    ///
-    /// csv 文件内容需要是从 WizTree 从文件中直接导出(WizTree 内部排序任意皆可)而不经过任何顺序调整的.
-    pub fn from_csv_file(file: impl AsRef<Path>) -> Result<Snapshot, Error> {
-        Self::from_csv_content(File::open(file)?)
-    }
-
-    /// 从 csv 文件中构建 [`Snapshot`].
-    ///
-    /// 同 [`Self::from_ordered_records`], 但是在牺牲性能的情况下允许 csv 的各行记录允许被打乱.
-    pub fn from_unordered_csv_file(file: impl AsRef<Path>) -> Result<Snapshot, Error> {
-        Self::from_unordered_csv_content(File::open(file)?)
-    }
-
-    pub fn from_csv_content(csv_content: impl Read) -> Result<Snapshot, Error> {
-        let records = Self::records_from_csv_content(csv_content)?;
-        Ok(Self::from_ordered_records(&records))
-    }
-
-    pub fn from_unordered_csv_content(csv_content: impl Read) -> Result<Snapshot, Error> {
-        let records = Self::records_from_csv_content(csv_content)?;
-        Ok(Self::from_unordered_records(&records))
-    }
-
-    fn records_from_csv_content(csv_content: impl Read) -> Result<Vec<RawRecord>, Error> {
-        let mut reader = build_csv_reader(csv_content)?;
-        let mut ok = Ok(());
-        let records: Vec<_> = reader
-            .records()
-            .map_while(|r| {
-                let string_rec = match r {
-                    Ok(string_rec) => string_rec,
-                    Err(e) => {
-                        ok = Err(e);
-                        return None;
-                    }
-                };
-                match string_rec.deserialize(None) {
-                    Ok(rec) => Some(rec),
-                    Err(e) => {
-                        ok = Err(e);
-                        None
-                    }
-                }
-            })
-            .collect();
-        ok?;
-        Ok(records)
-    }
-
     /// 放入新的根节点, 并返回该节点的一个强引用.
     fn push_root(&mut self, mut root: RecordNode) -> RcRecordNode {
         root.clear_parent();
@@ -621,8 +481,9 @@ impl Snapshot {
 }
 
 pub(crate) mod builder {
+    use std::io;
     use super::*;
-    use std::io::Seek;
+    use std::io::{BufRead, BufReader, Chain, Cursor, Seek};
     use std::time::{Duration, Instant};
     use serde::Serialize;
 
@@ -653,13 +514,8 @@ pub(crate) mod builder {
     pub enum Message {
         /// 开始构建, 包含一个总字节数
         Start(usize),
-        /// 加载分析内容
-        ///
-        /// # Note
-        /// [`Builder`] 读取 csv 的一段字节之后报告此消息,
-        /// 读取之后还会对读取的内容进行处理,
-        /// 所以 `Processing` 中 current 如果和 total 相等也不说明构建完成.
-        Processing {
+        /// 读取 csv 内容中
+        Reading {
             /// 当前已读取的字节数
             current: usize,
             /// 距离上一次报告读取的字节数
@@ -667,15 +523,24 @@ pub(crate) mod builder {
             /// 总字节数
             total: usize,
         },
-        /// 构建完成
-        Finished,
-        /// 构建错误, 错误信息可以在返回的 Result 中找到
-        Error {
-            /// 当前已读取的字节数
+        /// 内容读取完毕
+        ReadDone,
+        /// 加载分析内容
+        ///
+        /// # Note
+        /// record 对应 csv 中的一行.
+        Processing {
+            /// 当前已处理的 records 数
             current: usize,
-            /// 总字节数
+            /// 距离上一次报告处理的 records 数
+            delta: usize,
+            /// 总 records 数
             total: usize,
         },
+        /// 构建完成
+        Finished,
+        /// 错误, 错误信息可以在返回的 Result 中找到
+        Error,
     }
 
     pub trait Reporter {
@@ -688,10 +553,14 @@ pub(crate) mod builder {
         }
     }
 
-    /// 设置 [`Reporter`] 被调用的间隔.
-    /// 只会对 [`Message::Processing`] 消息生效.
+    impl Reporter for () {
+        fn report(&mut self, _: Message) {}
+    }
+
+    /// [`Reporter`] 被调用的间隔.
+    /// 只会对 [`Message::Reading`] 消息生效.
     #[derive(Copy, Eq, PartialEq, Debug, Clone)]
-    pub enum ReportInterval {
+    pub enum ReportReadingInterval {
         /// 至少间隔时间 t 才报告一次
         Time(Duration),
         /// 至少读取 n 字节才报告一次
@@ -702,12 +571,27 @@ pub(crate) mod builder {
         Zero,
     }
 
-    pub struct Builder<P: Reporter> {
-        reporter: Option<P>,
-        interval: ReportInterval,
+    /// [`Reporter`] 被调用的间隔.
+    /// 只会对 [`Message::Processing`] 消息生效.
+    #[derive(Copy, Eq, PartialEq, Debug, Clone)]
+    pub enum ReportProcessingInterval {
+        /// 至少间隔时间 t 才报告一次
+        Time(Duration),
+        /// 至少处理 r 个 records 才报告一次
+        Records(usize),
+        /// 不设置间隔, 每次读取操作都报告
+        Zero,
+    }
+    // todo 应用 ReportProcessingInterval
+
+    pub struct Builder<P: Reporter = ()> {
+        reporter: Option<RefCell<P>>,
+        reading_interval: ReportReadingInterval,
+        processing_interval: ReportProcessingInterval,
     }
 
-    impl<P: Reporter> Default for Builder<P> {
+    impl Default for Builder<()> {
+        /// 构建一个不能提供 [`Reporter`] 的 [`Builder`].
         fn default() -> Self {
             Self::new()
         }
@@ -717,27 +601,34 @@ pub(crate) mod builder {
         pub fn new() -> Builder<P> {
             Builder {
                 reporter: None,
-                interval: ReportInterval::Zero,
+                reading_interval: ReportReadingInterval::Zero,
+                processing_interval: ReportProcessingInterval::Zero,
             }
         }
 
-        fn report_msg(&mut self, msg: Message) {
-            if let Some(r) = self.reporter.as_mut() {
-                r.report(msg)
+        fn report_msg(&self, msg: Message) {
+            if let Some(r) = self.reporter.as_ref() {
+                r.borrow_mut().report(msg)
             }
         }
 
         pub fn set_reporter(&mut self, reporter: P) -> &mut Self {
-            self.reporter = Some(reporter);
+            self.reporter = Some(RefCell::new(reporter));
             self
         }
 
-        pub fn set_report_interval(&mut self, interval: ReportInterval) -> &mut Self {
-            self.interval = interval;
+        pub fn set_reading_report_interval(&mut self, interval: ReportReadingInterval) -> &mut Self {
+            self.reading_interval = interval;
             self
         }
 
-        pub fn build_from_content<R: Read + Seek>(&mut self, mut reader: R, ordered: bool) -> Result<Snapshot, Error> {
+        pub fn set_processing_report_interval(&mut self, interval: ReportProcessingInterval) -> &mut Self {
+            self.processing_interval = interval;
+            self
+        }
+
+        /// 同 [`Builder::build_from_file`] 但是直接使用 csv 文件的内容.
+        pub fn build_from_content<R: Read + Seek>(&self, mut reader: R, ordered: bool) -> Result<Snapshot, Error> {
             let total = reader.seek(std::io::SeekFrom::End(0))? as usize;
             reader.seek(std::io::SeekFrom::Start(0))?;
             let mut current = 0usize;
@@ -746,20 +637,15 @@ pub(crate) mod builder {
             let mut rep_bytes = 0usize;
             let mut rep_count = 0usize;
             self.report_msg(Message::Start(total));
-            let from_fn = if ordered {
-                Snapshot::from_csv_content
-            } else {
-                Snapshot::from_unordered_csv_content
-            };
-            let rst = from_fn(InspectReader::new(
+            let rst = self.build_from_csv_content(InspectReader::new(
                 reader, |n| {
                     current += n;
-                    let whether_report: bool = match self.interval {
-                        ReportInterval::Time(duration) => {
+                    let whether_report: bool = match self.reading_interval {
+                        ReportReadingInterval::Time(duration) => {
                             rep_time.map_or(/* 没有初始间隔 */true,
                                             |t| t.elapsed() >= duration)
                         }
-                        ReportInterval::Bytes(bytes) => if rep_bytes >= bytes {
+                        ReportReadingInterval::Bytes(bytes) => if rep_bytes >= bytes {
                             if bytes == 0 {
                                 rep_bytes = 0;
                             } else {
@@ -767,7 +653,7 @@ pub(crate) mod builder {
                             }
                             true
                         } else { false },
-                        ReportInterval::Count(count) => if rep_count >= count {
+                        ReportReadingInterval::Count(count) => if rep_count >= count {
                             if count == 0 {
                                 rep_count = 0;
                             } else {
@@ -775,7 +661,7 @@ pub(crate) mod builder {
                             }
                             true
                         } else { false },
-                        ReportInterval::Zero => true,
+                        ReportReadingInterval::Zero => true,
                     };
                     if whether_report {
                         let delta = current - reported;
@@ -786,26 +672,193 @@ pub(crate) mod builder {
                     rep_bytes += n;
                     rep_count += 1;
                 },
-            ));
+            ), ordered);
             self.report_msg(if rst.is_ok() {
                 Message::Finished
             } else {
-                Message::Error { current, total }
+                Message::Error
             });
             rst
         }
 
-        pub fn build_from_file(&mut self, path: impl AsRef<Path>, ordered: bool) -> Result<Snapshot, Error> {
+
+        /// 从 csv 文件中构建 [`Snapshot`].
+        ///
+        /// 如果 `ordered` 为 `true`, 则不允许 csv 在从 WizTree 导出后调换行顺序.
+        /// 如果 `ordered` 为 `false`, 则会在牺牲性能的情况下允许 csv 的各行记录允许被打乱.
+        pub fn build_from_file(&self, path: impl AsRef<Path>, ordered: bool) -> Result<Snapshot, Error> {
             self.build_from_content(File::open(path)?, ordered)
         }
+
+        /// 从 [记录](RawRecord) 中构建一个 [空间分布快照](Snapshot).
+        ///
+        /// 此方法会对输入参数的所有数据进行拷贝.
+        ///
+        /// 此方法假定:
+        /// - 原始记录数组是按照原始 csv 文件中的行顺序排列的
+        ///   (wiztree 的所有排列方式都能保证子目录紧随直接父目录),
+        ///   没有进行顺序调整过.
+        /// - RawRecord 中所有的路径都是已经标准化的, 不包含 `..` 或 `.` 或符号链接等内容.
+        /// - 没有重复路径的 RawRecord.
+        /// - 一个 RawRecord 的路径如果存在, 那么在它的逐级父路径对应的 RawRecord 都在它之前存在, 直到根节点.
+        ///   比如:
+        ///   > 如果 `/a/b/c/d` 存在, csv 中的根目录为 `/a/b`,
+        ///   > 那么 `/a/b/c` 和 `/a/b` 一定存在且在 `/a/b/c/d` 之前.
+        ///
+        /// 如果传入已经排序过的记录, 会产生错误地结果,
+        /// 此时应该使用性能较劣的 [`Builder::process_unordered_records`]
+        /// 以获得正确的输出.
+        pub(super) fn process_ordered_records(&self, records: &[RawRecord]) -> Snapshot {
+            if records.is_empty() {
+                return Snapshot { roots: Vec::new() }; // 空值
+            }
+            let mut sd = Snapshot { roots: Vec::new() };
+            let mut cur_rec = sd.push_root(
+                RecordNode::new(records[0].clone()) // 第一个 record 一定是根目录之一.
+            );
+            for raw_rec in &records[1..] {
+                let rec = RecordNode::new(raw_rec.clone());
+                // 不断向上查找, 直到 cur_rec 为 rec 的父目录.
+                while !rec.path.starts_with(&cur_rec.borrow().path) {
+                    let Some(parent) = cur_rec.borrow().parent() else {
+                        // cur_rec 如果是根节点.
+                        break;
+                    };
+                    cur_rec = parent;
+                }
+                if rec.path.starts_with(&cur_rec.borrow().path) {
+                    // 如果 rec 是 cur_rec 的子目录.
+                    cur_rec = cur_rec.push_child(rec);
+                } else {
+                    // rec 不是 cur_rec 的子目录, 此处是因为上面的 while 循环 break 了.
+                    cur_rec = sd.push_root(rec);
+                }
+            }
+            sd
+        }
+
+        /// 从 [记录](RawRecord) 中构建一个 [空间分布快照](Snapshot).
+        ///
+        /// 此方法会对输入参数的所有数据进行拷贝.
+        ///
+        /// 此方法假定:
+        /// - RawRecord 中所有的路径都是已经解析过的, 不包含 `..` 或 `.` 或符号链接等内容.
+        /// - 没有重复路径的 RawRecord.
+        ///
+        /// 此方法允许输入 records 数组是乱序的,
+        /// 但是性能相比 [`Builder::process_ordered_records`] 较差.
+        pub(super) fn process_unordered_records(&self, records: &[RawRecord]) -> Snapshot {
+            let mut roots = Vec::new();
+            // 一次全量拷贝
+            let records_set: HashSet<_> = records.iter()
+                .map(|raw| RcRecordNode::new(RecordNode::new(raw.clone())))
+                .collect();
+            // 一次全量引用
+            let mut paths: Vec<_> = records.iter()
+                .map(|raw_rec| &raw_rec.path)
+                .collect();
+            // 逐级排序, 保证父目录在子目录之前.
+            paths.sort_unstable_by_key(|x| x.components().count());
+            for p in paths {
+                let mut has_parent = false;
+                // 创建一个临时无用节点, 用于 hash
+                // 一次对 Path 的拷贝
+                let dummy_node = RcRecordNode::new(RecordNode::new(RawRecord::default_with_path(p.into())));
+                let node = records_set.get(&dummy_node).unwrap(); // 此节点一定存在
+                if let Some(parent_p) = p.parent() {
+                    // 一次对 Path 的拷贝
+                    let dummy_parent_node = RcRecordNode::new(RecordNode::new(RawRecord::default_with_path(parent_p.into())));
+                    if let Some(parent_node) = records_set.get(&dummy_parent_node) {
+                        parent_node.push_rc_child(node);
+                        has_parent = true;
+                    }
+                };
+                if !has_parent {
+                    roots.push(RcRecordNode::clone(node));
+                }
+            }
+            Snapshot { roots }
+        }
+
+        pub(super) fn build_from_csv_content(&self, csv_content: impl Read, ordered: bool) -> Result<Snapshot, Error> {
+            let records = self.read_records_from_csv_content(csv_content)?;
+            self.report_msg(Message::ReadDone);
+            Ok(if ordered {
+                self.process_ordered_records(&records)
+            } else {
+                self.process_unordered_records(&records)
+            })
+        }
+
+        pub(super) fn read_records_from_csv_content(&self, csv_content: impl Read) -> Result<Vec<RawRecord>, Error> {
+            let mut reader = build_csv_reader(csv_content)?;
+            let mut ok = Ok(());
+            let records: Vec<_> = reader
+                .records()
+                .map_while(|r| {
+                    let string_rec = match r {
+                        Ok(string_rec) => string_rec,
+                        Err(e) => {
+                            ok = Err(e);
+                            return None;
+                        }
+                    };
+                    match string_rec.deserialize(None) {
+                        Ok(rec) => Some(rec),
+                        Err(e) => {
+                            ok = Err(e);
+                            None
+                        }
+                    }
+                })
+                .collect();
+            ok?;
+            Ok(records)
+        }
+    }
+
+
+    /// 以一个 [`Read`] 作为内容, 创建一个 CSV Reader,
+    /// 并自动跳过可能的 header 行之前的无效行.
+    ///
+    /// 此函数假定:
+    /// - 每个 csv 文件都有至少一个 header 行.
+    ///
+    /// # Parameters
+    /// - `content_reader`: csv 内容, 注意不是 csv 文件路径.
+    pub(super) fn build_csv_reader<R: Read>(
+        content_reader: R,
+    ) -> Result<csv::Reader<Chain<Cursor<String>, BufReader<R>>>, Error> {
+        let mut buf_reader = BufReader::new(content_reader);
+        // 找到 header 行
+        let header_line = loop {
+            let mut line = String::new();
+            if buf_reader.read_line(&mut line)? == 0 {
+                // 读取到文件末尾
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "No header line found",
+                )));
+            };
+            if line.contains(",") {
+                break line;
+            }
+        };
+
+        let reader = csv::ReaderBuilder::new().has_headers(true).from_reader(
+            // 拼接回 header 行
+            Cursor::new(header_line + "\n").chain(buf_reader),
+        );
+
+        Ok(reader)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::builder::{Builder, ReportInterval};
-    use std::time::Instant;
+    use super::builder::*;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn size_of() {
@@ -821,7 +874,7 @@ mod tests {
 
     #[test]
     fn common_path_prefix() {
-        let sd = Snapshot::from_ordered_records(&[
+        let sd = Builder::default().process_ordered_records(&[
             new_raw_record("a/b/c/d/"),
             new_raw_record("a/b/c/f/"),
             new_raw_record("a/b/go/g/"),
@@ -830,7 +883,7 @@ mod tests {
         assert_eq!(sd.get_common_path_prefix().unwrap(), PathBuf::from("a/b/"));
         #[cfg(windows)]
         {
-            let sd = Snapshot::from_ordered_records(&[
+            let sd = Builder::default().process_ordered_records(&[
                 new_raw_record("D:/"),
                 new_raw_record("C:/"),
             ]);
@@ -840,7 +893,7 @@ mod tests {
 
     #[test]
     fn format_nodes() {
-        let sd = Snapshot::from_ordered_records(&[
+        let sd = Builder::default().process_ordered_records(&[
             new_raw_record("a/"),
             new_raw_record("a/b/"),
             new_raw_record("a/b/c/"),
@@ -862,41 +915,109 @@ mod tests {
 
     #[test]
     fn build_snapshot_ordered() {
-        let sd = Snapshot::from_csv_file("example_data/example_small_partial.csv").unwrap();
+        let sd = Builder::default().build_from_file(
+            "example_data/example_small_partial.csv",
+            true,
+        ).unwrap();
         println!("{}", sd.format_tree(None));
     }
 
     #[test]
     fn bench_build_snapshot_ordered_records() {
         let start = Instant::now();
-        let sd = Snapshot::from_csv_file("example_data/example_old.csv").unwrap();
+        let sd = Builder::default().build_from_file(
+            "example_data/example_old.csv",
+            true,
+        ).unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 10.5s (260w记录)
         println!("{}", sd.format_tree(Some(1)));
     }
 
     #[test]
     fn build_sd_from_unordered_csv() {
-        let sd = Snapshot::from_unordered_csv_file("example_data/example_multi_roots.csv").unwrap();
+        let sd = Builder::default().build_from_file(
+            "example_data/example_multi_roots.csv",
+            false,
+        ).unwrap();
         println!("{}", sd.format_tree(None));
     }
 
     #[test]
     fn bench_build_space_distribution_unordered_records() {
         let start = Instant::now();
-        let sd = Snapshot::from_unordered_csv_file("example_data/example_old.csv").unwrap();
+        let sd = Builder::default().build_from_file(
+            "example_data/example_old.csv",
+            false,
+        ).unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 31.8670859s
         println!("{}", sd.format_tree(Some(1)));
     }
 
     #[test]
-    fn test_builder() {
+    fn builder() {
         let snapshot = Builder::new()
             .set_reporter(|m| {
                 dbg!(m);
             })
-            .set_report_interval(ReportInterval::Zero)
+            .set_reading_report_interval(ReportReadingInterval::Zero)
             .build_from_file("example_data/example_small_partial.csv", true)
             .unwrap();
         println!("{}", snapshot.format_tree(None));
+    }
+
+    #[test]
+    fn parse_csv_records() {
+        let start = Instant::now();
+        let mut reader =
+            build_csv_reader(File::open("example_data/example_old.csv").unwrap()).unwrap();
+        let mut throttle = Throttler::new(Duration::from_secs(1));
+        for (i, record) in reader.records().enumerate() {
+            let record = record.unwrap();
+            // let v: Vec<_> = record.iter().collect();
+            let raw_record: RawRecord = record.deserialize(None).unwrap();
+            throttle.throttle_run(|| println!("{i}: {:?}", raw_record));
+        }
+        println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 6.34s
+    }
+
+    /// 控制调用的时间频率
+    struct Throttler {
+        last_trigger_time: Instant,
+        interval: Duration,
+    }
+
+    impl Throttler {
+        fn new(interval: Duration) -> Self {
+            Self {
+                last_trigger_time: Instant::now() - interval, // 确保能直接触发
+                interval,
+            }
+        }
+
+        /// 设置间隔时间并重置触发时间
+        fn set_interval(&mut self, interval: Duration) {
+            self.last_trigger_time = Instant::now() - interval;
+            self.interval = interval;
+        }
+
+        fn throttle(&mut self) -> bool {
+            if self.last_trigger_time.elapsed() >= self.interval {
+                self.last_trigger_time = Instant::now();
+                true
+            } else {
+                false
+            }
+        }
+
+        fn throttle_run<F, R>(&mut self, f: F) -> Option<R>
+        where
+            F: FnOnce() -> R,
+        {
+            if self.throttle() {
+                Some(f())
+            } else {
+                None
+            }
+        }
     }
 }
