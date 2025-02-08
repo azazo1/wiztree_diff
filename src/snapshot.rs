@@ -10,7 +10,6 @@ use std::io::Read;
 use std::ops::{Deref, DerefMut};
 use std::path;
 use std::path::{Component, Path, PathBuf};
-use std::rc::{Rc, Weak};
 
 /// 一个 [`RawRecord`] 记录了一个文件(夹)的基本信息.
 /// 对应一个 WizTree 导出的 csv 文件的一行.
@@ -43,10 +42,11 @@ pub(crate) struct RawRecord {
 
 impl RawRecord {
     fn default_with_path(path: PathBuf) -> RawRecord {
-        let mut rec = RawRecord::default();
-        rec.folder = path.to_string_lossy().ends_with(|x| x == '/' || x == '\\');
-        rec.path = path;
-        rec
+        RawRecord {
+            folder: path.to_string_lossy().ends_with(['/', '\\']),
+            path,
+            ..Self::default()
+        }
     }
 }
 
@@ -121,16 +121,28 @@ impl<'de> Deserialize<'de> for RawRecord {
     }
 }
 
-/// 可以实现一个简短 Debug, Display 输出的 [`Rc<RefCell<RecordNode>>`] 类型
-pub(crate) struct RcRecordNode(Rc<RefCell<RecordNode>>);
+#[cfg(not(feature = "arc"))]
+mod arc {
+    pub(super) type RefCount<T> = std::rc::Rc<T>;
+    pub(super) type Weak<T> = std::rc::Weak<T>;
+}
+#[cfg(feature = "arc")]
+mod arc {
+    pub(super) type RefCount<T> = std::sync::Arc<T>;
+    pub(super) type Weak<T> = std::sync::Weak<T>;
+}
+use arc::*;
+
+/// 可以实现一个简短 Debug, Display 输出的 [`RefCount<RefCell<RecordNode>>`] 类型
+pub(crate) struct RcRecordNode(RefCount<RefCell<RecordNode>>);
 
 impl RcRecordNode {
     pub(crate) fn clone(node: &RcRecordNode) -> Self {
-        Self(Rc::clone(&node.0))
+        Self(RefCount::clone(&node.0))
     }
 
     fn new(node: RecordNode) -> Self {
-        Self(Rc::new(RefCell::new(node)))
+        Self(RefCount::new(RefCell::new(node)))
     }
 
     /// 见 [`RecordNode::push_child`]
@@ -172,7 +184,7 @@ impl std::fmt::Display for RcRecordNode {
 }
 
 impl Deref for RcRecordNode {
-    type Target = Rc<RefCell<RecordNode>>;
+    type Target = RefCount<RefCell<RecordNode>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -185,8 +197,8 @@ impl DerefMut for RcRecordNode {
     }
 }
 
-impl AsRef<Rc<RefCell<RecordNode>>> for RcRecordNode {
-    fn as_ref(&self) -> &Rc<RefCell<RecordNode>> {
+impl AsRef<RefCount<RefCell<RecordNode>>> for RcRecordNode {
+    fn as_ref(&self) -> &RefCount<RefCell<RecordNode>> {
         &self.0
     }
 }
@@ -235,7 +247,7 @@ impl RecordNode {
     }
 
     fn set_parent(&mut self, parent: &RcRecordNode) {
-        self.parent = Rc::downgrade(parent);
+        self.parent = RefCount::downgrade(parent);
     }
 
     fn clear_parent(&mut self) {
@@ -435,7 +447,7 @@ impl Snapshot {
     /// 放入新的根节点, 并返回该节点的一个强引用.
     fn push_root(&mut self, mut root: RecordNode) -> RcRecordNode {
         root.clear_parent();
-        let rc = RcRecordNode(Rc::new(RefCell::new(root)));
+        let rc = RcRecordNode::new(root);
         self.roots.push(RcRecordNode::clone(&rc));
         rc
     }
@@ -676,6 +688,12 @@ pub(crate) mod builder {
         interval: ReportInterval,
     }
 
+    impl<P: Reporter> Default for Builder<P> {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl<P: Reporter> Builder<P> {
         pub fn new() -> Builder<P> {
             Builder {
@@ -858,6 +876,6 @@ mod tests {
             .set_report_interval(ReportInterval::Zero)
             .build_from_file("example_data/example_small_partial.csv", true)
             .unwrap();
-        dbg!(snapshot);
+        println!("{}", snapshot.format_tree(None));
     }
 }
