@@ -2,7 +2,7 @@
 mod snapshot;
 mod diff;
 
-pub use diff::{Diff, DiffKind, Diffable, DiffNode};
+pub use diff::{Diff, DiffKind, DiffNode};
 pub use snapshot::{Snapshot, builder::{Builder, ReportInterval, Reporter, Message}};
 
 use std::fmt::Debug;

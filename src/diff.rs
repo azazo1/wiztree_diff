@@ -212,6 +212,7 @@ impl DiffNode {
 /// 两个 [`Snapshot`] 的对比,
 /// 此结构体对两者进行借用而不拷贝数据.
 #[derive(Debug)]
+#[cfg(not(feature = "owning_diff"))]
 pub struct Diff<'s> {
     /// 比较中较新的 [`Snapshot`]
     newer: &'s Snapshot,
@@ -231,6 +232,222 @@ pub struct Diff<'s> {
     nodes: Vec<DiffNode>,
 }
 
+#[derive(Debug)]
+#[cfg(feature = "owning_diff")]
+pub struct Diff {
+    newer: Snapshot,
+    older: Snapshot,
+    current_node: DiffNode,
+    nodes: Vec<DiffNode>,
+}
+
+macro_rules! impl_diff {
+    () => {
+        fn diff_records<'t, I1, I2>(newer: I1, older: I2) -> Vec<DiffNode>
+        where
+            I1: Iterator<Item=&'t RcRecordNode>,
+            I2: Iterator<Item=&'t RcRecordNode>,
+        {
+            let mut newer: Vec<_> = newer.collect();
+            let mut older: Vec<_> = older.collect();
+            // 可能这里的排序会导致性能问题, 但是这里应该是非热点代码.
+            fn cmp(a: &&RcRecordNode, b: &&RcRecordNode) -> Ordering {
+                // 可能这里的 borrow 会导致性能问题
+                a.borrow().path.cmp(&b.borrow().path)
+            }
+            newer.sort_unstable_by(cmp);
+            older.sort_unstable_by(cmp);
+            let mut newer_iter = newer.iter();
+            let mut older_iter = older.iter();
+            let mut newer_cur = newer_iter.next();
+            let mut older_cur = older_iter.next();
+            let mut rst = Vec::new();
+            loop {
+                match (newer_cur, older_cur) {
+                    (Some(new), Some(old)) => {
+                        let new = RcRecordNode::clone(new);
+                        let old = RcRecordNode::clone(old);
+                        match cmp(&&new, &&old) {
+                            Ordering::Less => {
+                                rst.push(DiffNode::new(Some(new), None).unwrap());
+                                newer_cur = newer_iter.next();
+                            }
+                            Ordering::Equal => {
+                                if new.borrow().folder == old.borrow().folder {
+                                    rst.push(DiffNode::new(Some(new), Some(old)).unwrap());
+                                } else {
+                                    rst.push(DiffNode::new(Some(new), None).unwrap());
+                                    rst.push(DiffNode::new(None, Some(old)).unwrap());
+                                }
+                                newer_cur = newer_iter.next();
+                                older_cur = older_iter.next();
+                            }
+                            Ordering::Greater => {
+                                rst.push(DiffNode::new(None, Some(old)).unwrap());
+                                older_cur = older_iter.next();
+                            }
+                        }
+                    }
+                    (Some(new), None) => {
+                        rst.push(DiffNode::new(Some(RcRecordNode::clone(new)), None).unwrap());
+                        newer_cur = newer_iter.next();
+                    }
+                    (None, Some(old)) => {
+                        rst.push(DiffNode::new(None, Some(RcRecordNode::clone(old))).unwrap());
+                        older_cur = older_iter.next();
+                    }
+                    (None, None) => break
+                }
+            }
+            rst
+        }
+
+        /// 观察对比一对新旧节点.
+        fn view_node(&mut self, newer: Option<RcRecordNode>, older: Option<RcRecordNode>) -> Result<(), Error> {
+            if newer.is_none() && older.is_none() {
+                return Err(Error::BothNone);
+            }
+            let borrow_newer = newer.as_ref().map(|n| n.borrow());
+            let borrow_older = older.as_ref().map(|n| n.borrow());
+            if let (Some(newer), Some(older)) = (&borrow_newer, &borrow_older) {
+                if newer.path != older.path {
+                    return Err(Error::PathNEqual);
+                } else if newer.folder != older.folder {
+                    return Err(Error::TypeMismatch);
+                }
+            }
+            self.nodes = Diff::diff_records(
+                // Option iter flat_map 的结果是产生一个迭代器.
+                // - 如果 Option 为 None, 那么代器返回 None.
+                // - 如果 Option 为 Some, 将值 map 为一个迭代器(这里为迭代节点的子节点),
+                //   然后产生的迭代器就是这个迭代器.
+                borrow_newer.iter().flat_map(|n| n.children().iter()),
+                borrow_older.iter().flat_map(|n| n.children().iter()),
+            );
+            drop(borrow_newer);
+            drop(borrow_older);
+            self.current_node = DiffNode::new(newer, older)?;
+            Ok(())
+        }
+
+        /// 同 [`Self::view_node`], 但是如果新旧节点类型不同, 那么观察是文件夹的那个节点.
+        fn pick_folder_to_view(&mut self, newer_node: Option<RcRecordNode>, older_node: Option<RcRecordNode>) -> Result<(), Error> {
+            match (newer_node, older_node) {
+                (Some(newer_node), Some(older_node)) => {
+                    let borrow_newer = newer_node.borrow();
+                    let borrow_older = older_node.borrow();
+                    if borrow_newer.path != borrow_older.path {
+                        return Err(Error::PathNEqual);
+                    }
+                    let new_is_folder = borrow_newer.folder;
+                    let old_is_folder = borrow_older.folder;
+                    drop((borrow_newer, borrow_older));
+                    if new_is_folder != old_is_folder { // 如果一个是文件, 一个是文件夹, 那么观察文件夹.
+                        if new_is_folder {
+                            self.view_node(Some(newer_node), None)?;
+                        } else {
+                            self.view_node(None, Some(older_node))?;
+                        }
+                        Ok(())
+                    } else {
+                        self.view_node(Some(newer_node), Some(older_node))
+                    }
+                }
+                (newer_node, older_node) => {
+                    self.view_node(newer_node, older_node)
+                }
+            }
+        }
+
+        /// 观察并 diff 指定路径 `path` 节点下的子节点,
+        /// - 如果路径在观察的两个 [`Snapshot`] 中都不存在, 则返回错误.
+        /// - 如果 `path` 表示的节点在新旧其中一个 Snapshot 中表示为文件, 在另一个中表示为文件夹,
+        ///   那么观察文件夹, 因为文件不可进入.
+        /// - `path` 需要为完整的路径, 能够完整表示一个节点, 可以使用 `..` 或者 `.`, 但是不会解析符号链接.
+        pub fn view_path(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
+            let newer_node = self.newer.search_node(&path);
+            let older_node = self.older.search_node(&path);
+            self.pick_folder_to_view(newer_node, older_node)
+        }
+
+        /// 按照 [`comp`] 改变观察路径.
+        pub fn view_comp(&mut self, comp: Component) -> Result<(), Error> {
+            match comp {
+                Component::CurDir => (),
+                Component::ParentDir => {
+                    // 如果两个节点都有父节点, 那么由于两个节点路径相同, 父节点的路径也相同, 直接构建 DiffNode.
+                    if let (Some(newer_parent), Some(older_parent)) = self.current_node.get_parents() {
+                        self.view_node(Some(newer_parent), Some(older_parent))?; // 这里不会 TypeMismatch
+                    }
+                    if let Some(path) = self.current_node.path() {
+                        if let Some(parent) = path.parent() {
+                            self.view_path(parent).unwrap_or_else(|_| self.view_roots());
+                        } else {
+                            self.view_roots();
+                        }
+                    } // 如果 get_path 返回 None, 则说明当前节点是 dummy node, 不用继续向上.
+                }
+                Component::Normal(_) => {
+                    let (newer, older) = self.current_node.find_children(comp);
+                    self.view_node(newer, older)?;
+                }
+                Component::Prefix(_) => {
+                    self.view_node(self.newer.search_node(comp), self.older.search_node(comp))?;
+                }
+                Component::RootDir => {
+                    if !cfg!(windows) {
+                        self.view_node(
+                            self.newer.find_root("/"),
+                            self.newer.find_root("/"),
+                        )?;
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        /// 从当前节点开始, 一层一层进入相对路径 `path` 观察.
+        ///
+        /// # Developing Note
+        /// 如果无法进入 `path`, 那么会尝试复原原来的观察状态.
+        pub fn view_relpath(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
+            let raw_path = self.current_node.path();
+            let path = path.as_ref();
+            for comp in path.components() {
+                self.view_comp(comp).inspect_err(|_| {
+                    if let Some(raw_path) = &raw_path {
+                        self.view_path(raw_path).unwrap(); // 复原的时候不应该报错
+                    } else {
+                        self.view_roots();
+                    }
+                })?;
+            }
+            Ok(())
+        }
+
+        /// 观察 diff [`Snapshot`] 的各个根节点, 这是最顶层的观察.
+        pub fn view_roots(&mut self) {
+            self.current_node = DiffNode::dummy();
+            self.current_node.delta_size = self.newer.total_size() as isize - self.older.total_size() as isize;
+            self.current_node.delta_alloc = self.newer.total_alloc() as isize - self.older.total_alloc() as isize;
+            self.current_node.delta_n_files = self.newer.total_n_files() as isize - self.older.total_n_files() as isize;
+            self.current_node.delta_n_folders = self.newer.total_n_folders() as isize - self.older.total_n_folders() as isize;
+            self.nodes = Diff::diff_records(self.newer.iter_roots(), self.older.iter_roots());
+        }
+
+        /// 获取当前正在观察比较的节点下的子节点.
+        pub fn nodes(&self) -> &[DiffNode] {
+            &self.nodes
+        }
+
+        /// 获取当前正在观察的路径, 如果当前正在观察各个根节点, 则返回 None.
+        pub fn current_path(&self) -> Option<PathBuf> {
+            self.current_node.path()
+        }
+    }
+}
+
+#[cfg(not(feature = "owning_diff"))]
 impl<'s> Diff<'s> {
     pub fn new(newer: &'s Snapshot, older: &'s Snapshot) -> Diff<'s> {
         let mut diff = Diff {
@@ -242,221 +459,24 @@ impl<'s> Diff<'s> {
         diff.view_roots();
         diff
     }
-
-    fn diff_records(newer: impl Iterator<Item=&'s RcRecordNode>, older: impl Iterator<Item=&'s RcRecordNode>) -> Vec<DiffNode> {
-        let mut newer: Vec<_> = newer.collect();
-        let mut older: Vec<_> = older.collect();
-        // 可能这里的排序会导致性能问题, 但是这里应该是非热点代码.
-        fn cmp(a: &&RcRecordNode, b: &&RcRecordNode) -> Ordering {
-            // 可能这里的 borrow 会导致性能问题
-            a.borrow().path.cmp(&b.borrow().path)
-        }
-        newer.sort_unstable_by(cmp);
-        older.sort_unstable_by(cmp);
-        let mut newer_iter = newer.iter();
-        let mut older_iter = older.iter();
-        let mut newer_cur = newer_iter.next();
-        let mut older_cur = older_iter.next();
-        let mut rst = Vec::new();
-        loop {
-            match (newer_cur, older_cur) {
-                (Some(new), Some(old)) => {
-                    let new = RcRecordNode::clone(new);
-                    let old = RcRecordNode::clone(old);
-                    match cmp(&&new, &&old) {
-                        Ordering::Less => {
-                            rst.push(DiffNode::new(Some(new), None).unwrap());
-                            newer_cur = newer_iter.next();
-                        }
-                        Ordering::Equal => {
-                            if new.borrow().folder == old.borrow().folder {
-                                rst.push(DiffNode::new(Some(new), Some(old)).unwrap());
-                            } else {
-                                rst.push(DiffNode::new(Some(new), None).unwrap());
-                                rst.push(DiffNode::new(None, Some(old)).unwrap());
-                            }
-                            newer_cur = newer_iter.next();
-                            older_cur = older_iter.next();
-                        }
-                        Ordering::Greater => {
-                            rst.push(DiffNode::new(None, Some(old)).unwrap());
-                            older_cur = older_iter.next();
-                        }
-                    }
-                }
-                (Some(new), None) => {
-                    rst.push(DiffNode::new(Some(RcRecordNode::clone(new)), None).unwrap());
-                    newer_cur = newer_iter.next();
-                }
-                (None, Some(old)) => {
-                    rst.push(DiffNode::new(None, Some(RcRecordNode::clone(old))).unwrap());
-                    older_cur = older_iter.next();
-                }
-                (None, None) => break
-            }
-        }
-        rst
-    }
-
-    /// 观察对比一对新旧节点.
-    fn view_node(&mut self, newer: Option<RcRecordNode>, older: Option<RcRecordNode>) -> Result<(), Error> {
-        if newer.is_none() && older.is_none() {
-            return Err(Error::BothNone);
-        }
-        let borrow_newer = newer.as_ref().map(|n| n.borrow());
-        let borrow_older = older.as_ref().map(|n| n.borrow());
-        if let (Some(newer), Some(older)) = (&borrow_newer, &borrow_older) {
-            if newer.path != older.path {
-                return Err(Error::PathNEqual);
-            } else if newer.folder != older.folder {
-                return Err(Error::TypeMismatch);
-            }
-        }
-        self.nodes = Diff::diff_records(
-            // Option iter flat_map 的结果是产生一个迭代器.
-            // - 如果 Option 为 None, 那么代器返回 None.
-            // - 如果 Option 为 Some, 将值 map 为一个迭代器(这里为迭代节点的子节点),
-            //   然后产生的迭代器就是这个迭代器.
-            borrow_newer.iter().flat_map(|n| n.children().iter()),
-            borrow_older.iter().flat_map(|n| n.children().iter()),
-        );
-        drop(borrow_newer);
-        drop(borrow_older);
-        self.current_node = DiffNode::new(newer, older)?;
-        Ok(())
-    }
-
-    /// 同 [`Self::view_node`], 但是如果新旧节点类型不同, 那么观察是文件夹的那个节点.
-    fn pick_folder_to_view(&mut self, newer_node: Option<RcRecordNode>, older_node: Option<RcRecordNode>) -> Result<(), Error> {
-        match (newer_node, older_node) {
-            (Some(newer_node), Some(older_node)) => {
-                let borrow_newer = newer_node.borrow();
-                let borrow_older = older_node.borrow();
-                if borrow_newer.path != borrow_older.path {
-                    return Err(Error::PathNEqual);
-                }
-                let new_is_folder = borrow_newer.folder;
-                let old_is_folder = borrow_older.folder;
-                drop((borrow_newer, borrow_older));
-                if new_is_folder != old_is_folder { // 如果一个是文件, 一个是文件夹, 那么观察文件夹.
-                    if new_is_folder {
-                        self.view_node(Some(newer_node), None)?;
-                    } else {
-                        self.view_node(None, Some(older_node))?;
-                    }
-                    Ok(())
-                } else {
-                    self.view_node(Some(newer_node), Some(older_node))
-                }
-            }
-            (newer_node, older_node) => {
-                self.view_node(newer_node, older_node)
-            }
-        }
-    }
-
-    /// 观察并 diff 指定路径 `path` 节点下的子节点,
-    /// - 如果路径在观察的两个 [`Snapshot`] 中都不存在, 则返回错误.
-    /// - 如果 `path` 表示的节点在新旧其中一个 Snapshot 中表示为文件, 在另一个中表示为文件夹,
-    ///   那么观察文件夹, 因为文件不可进入.
-    /// - `path` 需要为完整的路径, 能够完整表示一个节点, 可以使用 `..` 或者 `.`, 但是不会解析符号链接.
-    pub fn view_path(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
-        let newer_node = self.newer.search_node(&path);
-        let older_node = self.older.search_node(&path);
-        self.pick_folder_to_view(newer_node, older_node)
-    }
-
-    /// 按照 [`comp`] 改变观察路径.
-    pub fn view_comp(&mut self, comp: Component) -> Result<(), Error> {
-        match comp {
-            Component::CurDir => (),
-            Component::ParentDir => {
-                // 如果两个节点都有父节点, 那么由于两个节点路径相同, 父节点的路径也相同, 直接构建 DiffNode.
-                if let (Some(newer_parent), Some(older_parent)) = self.current_node.get_parents() {
-                    self.view_node(Some(newer_parent), Some(older_parent))?; // 这里不会 TypeMismatch
-                }
-                if let Some(path) = self.current_node.path() {
-                    if let Some(parent) = path.parent() {
-                        self.view_path(parent).unwrap_or_else(|_| self.view_roots());
-                    } else {
-                        self.view_roots();
-                    }
-                } // 如果 get_path 返回 None, 则说明当前节点是 dummy node, 不用继续向上.
-            }
-            Component::Normal(_) => {
-                let (newer, older) = self.current_node.find_children(comp);
-                self.view_node(newer, older)?;
-            }
-            Component::Prefix(_) => {
-                self.view_node(self.newer.search_node(comp), self.older.search_node(comp))?;
-            }
-            Component::RootDir => {
-                if !cfg!(windows) {
-                    self.view_node(
-                        self.newer.find_root("/"),
-                        self.newer.find_root("/"),
-                    )?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// 从当前节点开始, 一层一层进入相对路径 `path` 观察.
-    ///
-    /// # Developing Note
-    /// 如果无法进入 `path`, 那么会尝试复原原来的观察状态.
-    pub fn view_relpath(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
-        let raw_path = self.current_node.path();
-        let path = path.as_ref();
-        for comp in path.components() {
-            self.view_comp(comp).inspect_err(|_| {
-                if let Some(raw_path) = &raw_path {
-                    self.view_path(raw_path).unwrap(); // 复原的时候不应该报错
-                } else {
-                    self.view_roots();
-                }
-            })?;
-        }
-        Ok(())
-    }
-
-    /// 观察 diff [`Snapshot`] 的各个根节点, 这是最顶层的观察.
-    pub fn view_roots(&mut self) {
-        self.current_node = DiffNode::dummy();
-        self.current_node.delta_size = self.newer.total_size() as isize - self.older.total_size() as isize;
-        self.current_node.delta_alloc = self.newer.total_alloc() as isize - self.older.total_alloc() as isize;
-        self.current_node.delta_n_files = self.newer.total_n_files() as isize - self.older.total_n_files() as isize;
-        self.current_node.delta_n_folders = self.newer.total_n_folders() as isize - self.older.total_n_folders() as isize;
-        self.nodes = Diff::diff_records(self.newer.iter_roots(), self.older.iter_roots());
-    }
-
-    /// 获取当前正在观察比较的节点下的子节点.
-    pub fn nodes(&self) -> &[DiffNode] {
-        &self.nodes
-    }
-
-    /// 获取当前正在观察的路径, 如果当前正在观察各个根节点, 则返回 None.
-    pub fn current_path(&self) -> Option<PathBuf> {
-        self.current_node.path()
-    }
+    
+    impl_diff!();
 }
 
-pub trait Diffable {
-    type DiffResult<'a>
-    where
-        Self: 'a;
-
-    fn diff<'a>(&'a self, other: &'a Self) -> Self::DiffResult<'a>;
-}
-
-impl Diffable for Snapshot {
-    type DiffResult<'s> = Diff<'s>;
-
-    /// 以 other 作为基底, self 作为变化, 比较两个 [`Snapshot`]
-    fn diff<'s>(&'s self, other: &'s Self) -> Self::DiffResult<'s> {
-        Diff::new(self, other)
+#[cfg(feature = "owning_diff")]
+impl Diff {
+    pub fn new(newer: Snapshot, older: Snapshot) -> Diff {
+        let mut diff = Diff {
+            newer,
+            older,
+            current_node: DiffNode::dummy(),
+            nodes: Vec::new(),
+        };
+        diff.view_roots();
+        diff
     }
+
+    impl_diff!();
 }
 
 #[cfg(test)]
@@ -500,7 +520,10 @@ mod tests {
 "#;
         let older = Snapshot::from_csv_content(Cursor::new(OLDER)).unwrap();
         let newer = Snapshot::from_csv_content(Cursor::new(NEWER)).unwrap();
-        let mut diff = newer.diff(&older);
+        #[cfg(not(feature = "owning_diff"))]
+        let mut diff = Diff::new(&newer, &older);
+        #[cfg(feature = "owning_diff")]
+        let mut diff = Diff::new(newer, older);
         assert_eq!(diff.current_node.delta_alloc, -4096);
         assert_eq!(diff.nodes.len(), 1);
         assert_eq!(diff.nodes[0].delta_alloc, -4096);
@@ -531,7 +554,10 @@ mod tests {
 "#;
         let newer = Snapshot::from_csv_content(Cursor::new(NEWER)).unwrap();
         let older = Snapshot::from_csv_content(Cursor::new(OLDER)).unwrap();
-        let diff = newer.diff(&older);
+        #[cfg(not(feature = "owning_diff"))]
+        let mut diff = Diff::new(&newer, &older);
+        #[cfg(feature = "owning_diff")]
+        let mut diff = Diff::new(newer, older);
         dbg!(&diff.nodes);
         assert_eq!(diff.nodes.len(), 2);
     }
