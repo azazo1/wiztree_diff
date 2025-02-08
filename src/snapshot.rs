@@ -593,6 +593,7 @@ pub(crate) mod builder {
     use super::*;
     use std::io::Seek;
     use std::time::{Duration, Instant};
+    use serde::Serialize;
 
     struct InspectReader<R: Read, F: FnMut(usize)> {
         reader: R,
@@ -617,7 +618,7 @@ pub(crate) mod builder {
         }
     }
 
-    #[derive(Debug, Clone, Eq, PartialEq)]
+    #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
     pub enum Message {
         /// 开始构建, 包含一个总字节数
         Start(usize),
