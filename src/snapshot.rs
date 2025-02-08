@@ -589,9 +589,182 @@ impl Snapshot {
     }
 }
 
+pub(crate) mod builder {
+    use super::*;
+    use std::io::Seek;
+    use std::time::{Duration, Instant};
+
+    struct InspectReader<R: Read, F: FnMut(usize)> {
+        reader: R,
+        /// 每次读取时调用, 参数为本次读取的字节数
+        inspect_handler: F,
+    }
+
+    impl<R: Read, F: FnMut(usize)> InspectReader<R, F> {
+        fn new(reader: R, inspect_handler: F) -> Self {
+            InspectReader {
+                reader,
+                inspect_handler,
+            }
+        }
+    }
+
+    impl<R: Read, F: FnMut(usize)> Read for InspectReader<R, F> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.reader.read(buf)?;
+            (self.inspect_handler)(n);
+            Ok(n)
+        }
+    }
+
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    pub enum Message {
+        /// 开始构建, 包含一个总字节数
+        Start(usize),
+        /// 加载分析内容
+        ///
+        /// # Note
+        /// [`Builder`] 读取 csv 的一段字节之后报告此消息,
+        /// 读取之后还会对读取的内容进行处理,
+        /// 所以 `Processing` 中 current 如果和 total 相等也不说明构建完成.
+        Processing {
+            /// 当前已读取的字节数
+            current: usize,
+            /// 距离上一次报告读取的字节数
+            delta: usize,
+            /// 总字节数
+            total: usize,
+        },
+        /// 构建完成
+        Finished,
+        /// 构建错误, 错误信息可以在返回的 Result 中找到
+        Error {
+            /// 当前已读取的字节数
+            current: usize,
+            /// 总字节数
+            total: usize,
+        },
+    }
+
+    pub trait Reporter {
+        fn report(&mut self, msg: Message);
+    }
+
+    impl<F: FnMut(Message)> Reporter for F {
+        fn report(&mut self, msg: Message) {
+            self(msg);
+        }
+    }
+
+    /// 设置 [`Reporter`] 被调用的间隔.
+    /// 只会对 [`Message::Processing`] 消息生效.
+    #[derive(Copy, Eq, PartialEq, Debug, Clone)]
+    pub enum ReportInterval {
+        /// 至少间隔时间 t 才报告一次
+        Time(Duration),
+        /// 至少读取 n 字节才报告一次
+        Bytes(usize),
+        /// 至少进行 r 次读取操作才报告一次
+        Count(usize),
+        /// 不设置间隔, 每次读取操作都报告
+        Zero,
+    }
+
+    pub struct Builder<P: Reporter> {
+        reporter: Option<P>,
+        interval: ReportInterval,
+    }
+
+    impl<P: Reporter> Builder<P> {
+        pub fn new() -> Builder<P> {
+            Builder {
+                reporter: None,
+                interval: ReportInterval::Zero,
+            }
+        }
+
+        fn report_msg(&mut self, msg: Message) {
+            if let Some(r) = self.reporter.as_mut() {
+                r.report(msg)
+            }
+        }
+
+        pub fn set_reporter(&mut self, reporter: P) -> &mut Self {
+            self.reporter = Some(reporter);
+            self
+        }
+
+        pub fn set_report_interval(&mut self, interval: ReportInterval) -> &mut Self {
+            self.interval = interval;
+            self
+        }
+
+        pub fn build_from_content<R: Read + Seek>(&mut self, mut reader: R, ordered: bool) -> Result<Snapshot, Error> {
+            let total = reader.seek(std::io::SeekFrom::End(0))? as usize;
+            reader.seek(std::io::SeekFrom::Start(0))?;
+            let mut current = 0usize;
+            let mut reported = 0usize;
+            let mut rep_time: Option<Instant> = None;
+            let mut rep_bytes = 0usize;
+            let mut rep_count = 0usize;
+            self.report_msg(Message::Start(total));
+            let from_fn = if ordered {
+                Snapshot::from_csv_content
+            } else {
+                Snapshot::from_unordered_csv_content
+            };
+            let rst = from_fn(InspectReader::new(
+                reader, |n| {
+                    current += n;
+                    let whether_report: bool = match self.interval {
+                        ReportInterval::Time(duration) =>
+                            rep_time.map_or(/* 没有初始间隔 */true, |t| t.elapsed() >= duration),
+                        ReportInterval::Bytes(bytes) => if rep_bytes >= bytes {
+                            if bytes == 0 {
+                                rep_bytes = 0;
+                            } else {
+                                rep_bytes %= bytes;
+                            }
+                            true
+                        } else { false },
+                        ReportInterval::Count(count) => if rep_count >= count {
+                            if count == 0 {
+                                rep_count = 0;
+                            } else {
+                                rep_count %= count;
+                            }
+                            true
+                        } else { false },
+                        ReportInterval::Zero => true,
+                    };
+                    if whether_report {
+                        let delta = current - reported;
+                        self.report_msg(Message::Processing { current, delta, total });
+                        reported = current;
+                        rep_time = Some(Instant::now());
+                    }
+                    rep_bytes += n;
+                    rep_count += 1;
+                },
+            ));
+            self.report_msg(if rst.is_ok() {
+                Message::Finished
+            } else {
+                Message::Error { current, total }
+            });
+            rst
+        }
+
+        pub fn build_from_file(&mut self, path: impl AsRef<Path>, ordered: bool) -> Result<Snapshot, Error> {
+            self.build_from_content(File::open(path)?, ordered)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::snapshot::builder::{Builder, ReportInterval};
     use std::time::Instant;
 
     #[test]
@@ -673,5 +846,17 @@ mod tests {
         let sd = Snapshot::from_unordered_csv_file("example_data/example_1.csv").unwrap();
         println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 31.8670859s
         println!("{}", sd.format_tree(Some(1)));
+    }
+
+    #[test]
+    fn test_builder() {
+        let snapshot = Builder::new()
+            .set_reporter(|m| {
+                dbg!(m);
+            })
+            .set_report_interval(ReportInterval::Zero)
+            .build_from_file("example_data/example_small_partial.csv", true)
+            .unwrap();
+        dbg!(snapshot);
     }
 }
