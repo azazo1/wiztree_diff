@@ -510,6 +510,7 @@ pub(crate) mod builder {
     }
 
     #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+    #[serde(tag = "type", content = "data")]
     pub enum Message {
         /// 开始构建, 包含一个总字节数
         Start(usize),
@@ -533,7 +534,7 @@ pub(crate) mod builder {
         ///
         /// # Note
         /// 只会在 `ordered == false` 的时候出现此消息
-        SortingDone,
+        SortDone,
         /// 加载分析内容
         ///
         /// # Note
@@ -840,7 +841,7 @@ pub(crate) mod builder {
             // 逐级排序, 保证父目录在子目录之前.
             self.report_msg(Message::Sorting);
             paths.sort_unstable_by_key(|x| x.components().count());
-            self.report_msg(Message::SortingDone);
+            self.report_msg(Message::SortDone);
 
             let mut throttler = ProcessingThrottler::new(self.processing_interval);
             let mut reported = 0usize;
