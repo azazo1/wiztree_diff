@@ -321,7 +321,6 @@ pub struct Snapshot {
     roots: Vec<RcRecordNode>,
 }
 
-// todo 这些 from 方法放到 Builder 中.
 impl Snapshot {
     /// 放入新的根节点, 并返回该节点的一个强引用.
     fn push_root(&mut self, mut root: RecordNode) -> RcRecordNode {
@@ -503,7 +502,7 @@ pub(crate) mod builder {
     }
 
     impl<R: Read, F: FnMut(usize)> Read for InspectReader<R, F> {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             let n = self.reader.read(buf)?;
             (self.inspect_handler)(n);
             Ok(n)
@@ -525,6 +524,16 @@ pub(crate) mod builder {
         },
         /// 内容读取完毕
         ReadDone,
+        /// 正在排序 records
+        ///
+        /// # Note
+        /// 只会在 `ordered == false` 的时候出现此消息
+        Sorting,
+        /// 排序完毕
+        ///
+        /// # Note
+        /// 只会在 `ordered == false` 的时候出现此消息
+        SortingDone,
         /// 加载分析内容
         ///
         /// # Note
@@ -582,7 +591,87 @@ pub(crate) mod builder {
         /// 不设置间隔, 每次读取操作都报告
         Zero,
     }
-    // todo 应用 ReportProcessingInterval
+
+    struct ReadingThrottler {
+        interval: ReportReadingInterval,
+        last: Option<Instant>,
+        bytes: usize,
+        count: usize,
+    }
+    impl ReadingThrottler {
+        fn new(interval: ReportReadingInterval) -> Self {
+            Self {
+                interval,
+                last: None,
+                bytes: 0,
+                count: 0,
+            }
+        }
+
+        fn throttle(&mut self, read_bytes: usize) -> bool {
+            match self.interval {
+                ReportReadingInterval::Time(duration) => {
+                    let now = Instant::now();
+                    let elapsed = self.last.map_or(true, |t| now.duration_since(t) >= duration);
+                    if elapsed { self.last = Some(now); }
+                    elapsed
+                }
+                ReportReadingInterval::Bytes(bytes) => {
+                    self.bytes += read_bytes;
+                    if self.bytes >= bytes {
+                        if bytes == 0 { self.bytes = 0 } else { self.bytes %= bytes }
+                        true
+                    } else {
+                        false
+                    }
+                }
+                ReportReadingInterval::Count(count) => {
+                    self.count += 1;
+                    if self.count >= count {
+                        self.count = 0;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                ReportReadingInterval::Zero => true,
+            }
+        }
+    }
+
+    struct ProcessingThrottler {
+        interval: ReportProcessingInterval,
+        last: Option<Instant>,
+        count: usize,
+    }
+
+    impl ProcessingThrottler {
+        fn new(interval: ReportProcessingInterval) -> Self {
+            Self {
+                interval,
+                last: None,
+                count: 0,
+            }
+        }
+
+        fn throttle(&mut self) -> bool {
+            match self.interval {
+                ReportProcessingInterval::Time(duration) => {
+                    let now = Instant::now();
+                    let elapsed = self.last.map_or(true, |t| now.duration_since(t) >= duration);
+                    if elapsed { self.last = Some(now); }
+                    elapsed
+                }
+                ReportProcessingInterval::Records(r) => {
+                    self.count += 1;
+                    let w = self.count >= r;
+                    if w { self.count = 0; }
+                    w
+                }
+                ReportProcessingInterval::Zero => true,
+            }
+        }
+    }
 
     pub struct Builder<P: Reporter = ()> {
         reporter: Option<RefCell<P>>,
@@ -629,48 +718,20 @@ pub(crate) mod builder {
 
         /// 同 [`Builder::build_from_file`] 但是直接使用 csv 文件的内容.
         pub fn build_from_content<R: Read + Seek>(&self, mut reader: R, ordered: bool) -> Result<Snapshot, Error> {
-            let total = reader.seek(std::io::SeekFrom::End(0))? as usize;
-            reader.seek(std::io::SeekFrom::Start(0))?;
+            let total = reader.seek(io::SeekFrom::End(0))? as usize;
+            reader.seek(io::SeekFrom::Start(0))?;
             let mut current = 0usize;
             let mut reported = 0usize;
-            let mut rep_time: Option<Instant> = None;
-            let mut rep_bytes = 0usize;
-            let mut rep_count = 0usize;
+            let mut throttler = ReadingThrottler::new(self.reading_interval);
             self.report_msg(Message::Start(total));
             let rst = self.build_from_csv_content(InspectReader::new(
                 reader, |n| {
                     current += n;
-                    let whether_report: bool = match self.reading_interval {
-                        ReportReadingInterval::Time(duration) => {
-                            rep_time.map_or(/* 没有初始间隔 */true,
-                                            |t| t.elapsed() >= duration)
-                        }
-                        ReportReadingInterval::Bytes(bytes) => if rep_bytes >= bytes {
-                            if bytes == 0 {
-                                rep_bytes = 0;
-                            } else {
-                                rep_bytes %= bytes;
-                            }
-                            true
-                        } else { false },
-                        ReportReadingInterval::Count(count) => if rep_count >= count {
-                            if count == 0 {
-                                rep_count = 0;
-                            } else {
-                                rep_count %= count;
-                            }
-                            true
-                        } else { false },
-                        ReportReadingInterval::Zero => true,
-                    };
-                    if whether_report {
+                    if throttler.throttle(n) {
                         let delta = current - reported;
-                        self.report_msg(Message::Processing { current, delta, total });
+                        self.report_msg(Message::Reading { current, delta, total });
                         reported = current;
-                        rep_time = Some(Instant::now());
                     }
-                    rep_bytes += n;
-                    rep_count += 1;
                 },
             ), ordered);
             self.report_msg(if rst.is_ok() {
@@ -716,6 +777,22 @@ pub(crate) mod builder {
             let mut cur_rec = sd.push_root(
                 RecordNode::new(records[0].clone()) // 第一个 record 一定是根目录之一.
             );
+            let mut current = 1;
+            let mut reported = 0usize;
+            let mut throttler = ProcessingThrottler::new(self.processing_interval);
+            macro_rules! throttle_report {
+                () => {
+                    if throttler.throttle() {
+                        self.report_msg(Message::Processing {
+                            current,
+                            delta: current - reported,
+                            total: records.len(),
+                        });
+                        reported = current;
+                    } 
+                }
+            }
+            throttle_report!();
             for raw_rec in &records[1..] {
                 let rec = RecordNode::new(raw_rec.clone());
                 // 不断向上查找, 直到 cur_rec 为 rec 的父目录.
@@ -733,6 +810,9 @@ pub(crate) mod builder {
                     // rec 不是 cur_rec 的子目录, 此处是因为上面的 while 循环 break 了.
                     cur_rec = sd.push_root(rec);
                 }
+
+                current += 1;
+                throttle_report!();
             }
             sd
         }
@@ -758,8 +838,13 @@ pub(crate) mod builder {
                 .map(|raw_rec| &raw_rec.path)
                 .collect();
             // 逐级排序, 保证父目录在子目录之前.
+            self.report_msg(Message::Sorting);
             paths.sort_unstable_by_key(|x| x.components().count());
-            for p in paths {
+            self.report_msg(Message::SortingDone);
+
+            let mut throttler = ProcessingThrottler::new(self.processing_interval);
+            let mut reported = 0usize;
+            for (i, p) in paths.iter().enumerate() {
                 let mut has_parent = false;
                 // 创建一个临时无用节点, 用于 hash
                 // 一次对 Path 的拷贝
@@ -775,6 +860,15 @@ pub(crate) mod builder {
                 };
                 if !has_parent {
                     roots.push(RcRecordNode::clone(node));
+                }
+                if throttler.throttle() {
+                    let current = i + 1; // index -> count
+                    self.report_msg(Message::Processing {
+                        current,
+                        delta: current - reported,
+                        total: paths.len(),
+                    });
+                    reported = current;
                 }
             }
             Snapshot { roots }

@@ -3,7 +3,7 @@ mod snapshot;
 mod diff;
 
 pub use diff::{Diff, DiffKind, DiffNode};
-pub use snapshot::{Snapshot, builder::{Builder, ReportReadingInterval, Reporter, Message}};
+pub use snapshot::{Snapshot, builder::{Builder, ReportReadingInterval, ReportProcessingInterval, Reporter, Message}};
 
 use std::fmt::Debug;
 use std::io;

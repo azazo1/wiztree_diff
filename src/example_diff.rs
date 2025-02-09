@@ -1,6 +1,6 @@
 use std::io::{stdout, Write};
-use std::time::Duration;
-use wiztree_diff::{Builder, Diff, Message, ReportReadingInterval, Snapshot};
+use std::time::{Duration, Instant};
+use wiztree_diff::{Builder, Diff, Message, ReportProcessingInterval, ReportReadingInterval};
 
 fn progress_bar(cur: usize, total: usize) -> String {
     const FILL: &str = "■";
@@ -12,15 +12,20 @@ fn progress_bar(cur: usize, total: usize) -> String {
 }
 
 fn main() {
-    let mut builder = Builder::new();
+    let t = Instant::now();
+    let mut builder: Builder<_> = Builder::new();
     builder
         .set_reporter(|m| {
             if let Message::Processing { total, current, .. } = m {
-                print!("\r{}", progress_bar(current, total));
+                print!("\rP {}", progress_bar(current, total));
+                stdout().flush().unwrap();
+            } else if let Message::Reading { total, current, .. } = m {
+                print!("\rR {}", progress_bar(current, total));
                 stdout().flush().unwrap();
             }
         })
-        .set_reading_report_interval(ReportReadingInterval::Time(Duration::from_secs(1)));
+        .set_reading_report_interval(ReportReadingInterval::Time(Duration::from_secs(1)))
+        .set_processing_report_interval(ReportProcessingInterval::Time(Duration::from_secs(1)));
     let ss_older = builder.build_from_file("example_data/example_old.csv", true).unwrap();
     let ss_newer = builder.build_from_file("example_data/example_new.csv", true).unwrap();
     #[cfg(not(feature = "owning_diff"))]
@@ -33,4 +38,5 @@ fn main() {
     assert_eq!(diff.current_path(), Some("D:/".into()));
     diff.view_relpath("Temp").unwrap(); // 观察对比 D:/Temp 文件夹
     dbg!(diff.nodes());
+    println!("Time elapsed: {:?}", t.elapsed());
 }
