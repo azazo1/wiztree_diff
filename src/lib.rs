@@ -10,14 +10,14 @@ use std::io;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("IO error")]
+    #[error(transparent)]
     Io(#[from] io::Error),
     /// 可能会和 [`Io`](Error::Io) 重叠,
     ///
     /// 一般来说, 当 io 错误从 csv 操作中产生的时候,
     /// 会归因于此.
-    #[error("Csv parsing error")]
+    #[error(transparent)]
     Csv(#[from] csv::Error),
-    #[error("Error in diffing two space distribution")]
+    #[error(transparent)]
     Diffing(#[from] diff::Error),
 }
