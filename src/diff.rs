@@ -45,6 +45,22 @@ pub struct DiffNode {
     older_side_node: Option<RcRecordNode>,
 }
 
+impl Clone for DiffNode {
+    fn clone(&self) -> Self {
+        DiffNode {
+            kind: self.kind,
+            path: self.path.clone(),
+            folder: self.folder,
+            delta_size: self.delta_size,
+            delta_alloc: self.delta_alloc,
+            delta_n_files: self.delta_n_files,
+            delta_n_folders: self.delta_n_folders,
+            newer_side_node: self.newer_side_node.as_ref().map(RcRecordNode::clone),
+            older_side_node: self.older_side_node.as_ref().map(RcRecordNode::clone),
+        }
+    }
+}
+
 impl fmt::Debug for DiffNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         struct DebugOption<T>(Option<T>);
