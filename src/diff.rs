@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::fmt::Formatter;
 use std::path::{Component, Path, PathBuf};
+use serde::Serialize;
 use crate::snapshot::{RcRecordNode, Snapshot};
 
 #[derive(thiserror::Error, Debug)]
@@ -15,7 +16,7 @@ pub enum Error {
     TypeMismatch,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, Serialize)]
 pub enum DiffKind {
     /// 节点新建
     New,
@@ -26,17 +27,21 @@ pub enum DiffKind {
 }
 
 /// 用于比较一对相同路径的文件夹或者文件的节点
+#[derive(Serialize)]
 pub struct DiffNode {
     kind: DiffKind,
+    // dummy node 的 path 为 None.
     path: Option<PathBuf>,
     folder: bool,
     delta_size: isize,
     delta_alloc: isize,
     delta_n_files: isize,
     delta_n_folders: isize,
-    // newer_side_node 和 older_side_node 同时为 None 时是 dummy_node.
-    // newer_side_node 和 older_side_Node 同时为 Some 时, 它们的 path 相同.
+    /// newer_side_node 和 older_side_node 同时为 None 时是 dummy_node.
+    /// newer_side_node 和 older_side_Node 同时为 Some 时, 它们的 path 相同.
+    #[serde(skip)]
     newer_side_node: Option<RcRecordNode>,
+    #[serde(skip)]
     older_side_node: Option<RcRecordNode>,
 }
 
@@ -459,7 +464,7 @@ impl<'s> Diff<'s> {
         diff.view_roots();
         diff
     }
-    
+
     impl_diff!();
 }
 
@@ -561,5 +566,7 @@ mod tests {
         let mut diff = Diff::new(newer, older);
         dbg!(&diff.nodes);
         assert_eq!(diff.nodes.len(), 2);
+        let json = serde_json::to_string_pretty(&diff.nodes).unwrap();
+        println!("json: {}", json);
     }
 }
