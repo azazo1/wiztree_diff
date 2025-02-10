@@ -1089,12 +1089,6 @@ mod tests {
             }
         }
 
-        /// 设置间隔时间并重置触发时间
-        fn set_interval(&mut self, interval: Duration) {
-            self.last_trigger_time = Instant::now() - interval;
-            self.interval = interval;
-        }
-
         fn throttle(&mut self) -> bool {
             if self.last_trigger_time.elapsed() >= self.interval {
                 self.last_trigger_time = Instant::now();

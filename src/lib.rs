@@ -19,5 +19,5 @@ pub enum Error {
     #[error(transparent)]
     Csv(#[from] csv::Error),
     #[error(transparent)]
-    Diffing(#[from] diff::Error),
+    Diffing(#[from] diff::DiffError),
 }

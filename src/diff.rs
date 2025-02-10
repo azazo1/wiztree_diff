@@ -7,7 +7,7 @@ use crate::snapshot::{RcRecordNode, Snapshot};
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
-pub enum Error {
+pub enum DiffError {
     #[error("Failed to diff given node for both node being None")]
     BothNone,
     #[error("Path between two node are in different paths")]
@@ -99,7 +99,7 @@ impl DiffNode {
     /// 接收两个节点, 产生一个比较节点;
     /// - 如果两个节点都为 None, 返回 None.
     /// - 如果两个节点的路径不同, 返回 None.
-    fn new(newer_side_node: Option<RcRecordNode>, older_side_node: Option<RcRecordNode>) -> Result<Self, Error> {
+    fn new(newer_side_node: Option<RcRecordNode>, older_side_node: Option<RcRecordNode>) -> Result<Self, crate::Error> {
         let (kind, path, folder, delta_size, delta_alloc, delta_n_files, delta_n_folders) = match (&newer_side_node, &older_side_node) {
             (Some(new), None) => {
                 let new = new.borrow();
@@ -129,9 +129,9 @@ impl DiffNode {
                 let new = new.borrow();
                 let old = old.borrow();
                 if new.folder != old.folder {
-                    return Err(Error::TypeMismatch);
+                    Err(DiffError::TypeMismatch)?
                 } else if new.path != old.path {
-                    return Err(Error::PathNEqual);
+                    Err(DiffError::PathNEqual)?
                 } else {
                     (
                         DiffKind::Changed,
@@ -144,7 +144,7 @@ impl DiffNode {
                     )
                 }
             }
-            (None, None) => return Err(Error::BothNone)
+            (None, None) => Err(DiffError::BothNone)?
         };
         Ok(DiffNode {
             kind,
@@ -324,17 +324,17 @@ macro_rules! impl_diff {
         }
 
         /// 观察对比一对新旧节点.
-        fn view_node(&mut self, newer: Option<RcRecordNode>, older: Option<RcRecordNode>) -> Result<(), Error> {
+        fn view_node(&mut self, newer: Option<RcRecordNode>, older: Option<RcRecordNode>) -> Result<(), crate::Error> {
             if newer.is_none() && older.is_none() {
-                return Err(Error::BothNone);
+                Err(DiffError::BothNone)?;
             }
             let borrow_newer = newer.as_ref().map(|n| n.borrow());
             let borrow_older = older.as_ref().map(|n| n.borrow());
             if let (Some(newer), Some(older)) = (&borrow_newer, &borrow_older) {
                 if newer.path != older.path {
-                    return Err(Error::PathNEqual);
+                    Err(DiffError::PathNEqual)?;
                 } else if newer.folder != older.folder {
-                    return Err(Error::TypeMismatch);
+                    Err(DiffError::TypeMismatch)?;
                 }
             }
             self.nodes = Diff::diff_records(
@@ -352,13 +352,13 @@ macro_rules! impl_diff {
         }
 
         /// 同 [`Self::view_node`], 但是如果新旧节点类型不同, 那么观察是文件夹的那个节点.
-        fn pick_folder_to_view(&mut self, newer_node: Option<RcRecordNode>, older_node: Option<RcRecordNode>) -> Result<(), Error> {
+        fn pick_folder_to_view(&mut self, newer_node: Option<RcRecordNode>, older_node: Option<RcRecordNode>) -> Result<(), crate::Error> {
             match (newer_node, older_node) {
                 (Some(newer_node), Some(older_node)) => {
                     let borrow_newer = newer_node.borrow();
                     let borrow_older = older_node.borrow();
                     if borrow_newer.path != borrow_older.path {
-                        return Err(Error::PathNEqual);
+                        Err(DiffError::PathNEqual)?;
                     }
                     let new_is_folder = borrow_newer.folder;
                     let old_is_folder = borrow_older.folder;
@@ -385,14 +385,14 @@ macro_rules! impl_diff {
         /// - 如果 `path` 表示的节点在新旧其中一个 Snapshot 中表示为文件, 在另一个中表示为文件夹,
         ///   那么观察文件夹, 因为文件不可进入.
         /// - `path` 需要为完整的路径, 能够完整表示一个节点, 可以使用 `..` 或者 `.`, 但是不会解析符号链接.
-        pub fn view_path(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
+        pub fn view_path(&mut self, path: impl AsRef<Path>) -> Result<(), crate::Error> {
             let newer_node = self.newer.search_node(&path);
             let older_node = self.older.search_node(&path);
             self.pick_folder_to_view(newer_node, older_node)
         }
 
         /// 按照 [`comp`] 改变观察路径.
-        pub fn view_comp(&mut self, comp: Component) -> Result<(), Error> {
+        pub fn view_comp(&mut self, comp: Component) -> Result<(), crate::Error> {
             match comp {
                 Component::CurDir => (),
                 Component::ParentDir => {
@@ -431,7 +431,7 @@ macro_rules! impl_diff {
         ///
         /// # Developing Note
         /// 如果无法进入 `path`, 那么会尝试复原原来的观察状态.
-        pub fn view_relpath(&mut self, path: impl AsRef<Path>) -> Result<(), Error> {
+        pub fn view_relpath(&mut self, path: impl AsRef<Path>) -> Result<(), crate::Error> {
             let raw_path = self.current_node.path();
             let path = path.as_ref();
             for comp in path.components() {
