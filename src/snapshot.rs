@@ -376,7 +376,7 @@ impl Snapshot {
         rc
     }
 
-    pub(crate) fn iter_roots(&self) -> core::slice::Iter<RcRecordNode> {
+    pub(crate) fn iter_roots(&self) -> core::slice::Iter<'_, RcRecordNode> {
         self.roots.iter()
     }
 
@@ -418,7 +418,7 @@ impl Snapshot {
         s.push_str(&"  ".repeat(depth));
         let node = node.borrow();
         let mut comp_name = node.path.iter()
-            .last()
+            .next_back()
             .map_or_else(|| "[no name]".to_string(),
                          |x| x.to_string_lossy().to_string());
         s.push_str(&format!("{}\n", ensure_path_sep(
@@ -659,7 +659,7 @@ pub(crate) mod builder {
             match self.interval {
                 ReportReadingInterval::Time(duration) => {
                     let now = Instant::now();
-                    let elapsed = self.last.map_or(true, |t| now.duration_since(t) >= duration);
+                    let elapsed = self.last.is_none_or(|t| now.duration_since(t) >= duration);
                     if elapsed { self.last = Some(now); }
                     elapsed
                 }
@@ -705,7 +705,7 @@ pub(crate) mod builder {
             match self.interval {
                 ReportProcessingInterval::Time(duration) => {
                     let now = Instant::now();
-                    let elapsed = self.last.map_or(true, |t| now.duration_since(t) >= duration);
+                    let elapsed = self.last.is_none_or(|t| now.duration_since(t) >= duration);
                     if elapsed { self.last = Some(now); }
                     elapsed
                 }
