@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::Read;
+use std::io::{self, Read};
 use std::ops::{Deref, DerefMut};
 use std::path;
 use std::path::{Component, Path, PathBuf};
@@ -46,6 +46,52 @@ impl RawRecord {
             path,
             ..Self::default()
         }
+    }
+
+    fn from_csv_record(record: &csv::StringRecord) -> Result<Self, Error> {
+        fn missing_field(name: &str, len: usize) -> Error {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid csv row: missing field `{name}` in {len}-column record"),
+            ))
+        }
+
+        fn parse_field<'a>(
+            record: &'a csv::StringRecord,
+            index: usize,
+            name: &str,
+        ) -> Result<&'a str, Error> {
+            record.get(index).ok_or_else(|| missing_field(name, record.len()))
+        }
+
+        fn parse_number<T: std::str::FromStr>(
+            record: &csv::StringRecord,
+            index: usize,
+            name: &str,
+        ) -> Result<T, Error>
+        where
+            T::Err: std::fmt::Display,
+        {
+            let value = parse_field(record, index, name)?;
+            value.parse::<T>().map_err(|e| {
+                Error::Io(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid csv row: failed to parse `{name}` from `{value}`: {e}"),
+                ))
+            })
+        }
+
+        let path_string = parse_field(record, 0, "path")?.to_owned();
+        Ok(RawRecord {
+            folder: path_string.ends_with(['/', '\\']),
+            path: path_string.into(),
+            size: parse_number(record, 1, "size")?,
+            alloc: parse_number(record, 2, "alloc")?,
+            modify_time: parse_field(record, 3, "modify_time")?.to_owned(),
+            attributes: parse_number(record, 4, "attributes")?,
+            n_files: parse_number(record, 5, "n_files")?,
+            n_folders: parse_number(record, 6, "n_folders")?,
+        })
     }
 }
 
@@ -887,18 +933,18 @@ pub(crate) mod builder {
 
         pub(super) fn read_records_from_csv_content(&self, csv_content: impl Read) -> Result<Vec<RawRecord>, Error> {
             let mut reader = build_csv_reader(csv_content)?;
-            let mut ok = Ok(());
+            let mut ok: Result<(), Error> = Ok(());
             let records: Vec<_> = reader
                 .records()
                 .map_while(|r| {
                     let string_rec = match r {
                         Ok(string_rec) => string_rec,
                         Err(e) => {
-                            ok = Err(e);
+                            ok = Err(e.into());
                             return None;
                         }
                     };
-                    match string_rec.deserialize(None) {
+                    match RawRecord::from_csv_record(&string_rec) {
                         Ok(rec) => Some(rec),
                         Err(e) => {
                             ok = Err(e);
@@ -935,14 +981,14 @@ pub(crate) mod builder {
                     "No header line found",
                 )));
             };
-            if line.contains(",") {
+            if line.split(',').count() >= 7 {
                 break line;
             }
         };
 
-        let reader = csv::ReaderBuilder::new().has_headers(true).from_reader(
+        let reader = csv::ReaderBuilder::new().has_headers(true).flexible(true).from_reader(
             // 拼接回 header 行
-            Cursor::new(header_line + "\n").chain(buf_reader),
+            Cursor::new(header_line).chain(buf_reader),
         );
 
         Ok(reader)
@@ -953,6 +999,7 @@ pub(crate) mod builder {
 mod tests {
     use super::*;
     use super::builder::*;
+    use std::io::Cursor;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1069,10 +1116,30 @@ mod tests {
         for (i, record) in reader.records().enumerate() {
             let record = record.unwrap();
             // let v: Vec<_> = record.iter().collect();
-            let raw_record: RawRecord = record.deserialize(None).unwrap();
+            let raw_record = RawRecord::from_csv_record(&record).unwrap();
             throttle.throttle_run(|| println!("{i}: {:?}", raw_record));
         }
         println!("Elapsed: {:?}", start.elapsed()); // 260w rows in 6.34s
+    }
+
+    #[test]
+    fn parse_csv_records_with_optional_sponsor_line_and_drive_totals() {
+        let records = Builder::default().read_records_from_csv_content(Cursor::new(
+            "生成由 WizTree 4.28 2026/4/27 15:55:01 (您可以通过捐赠隐藏此信息)\n\
+文件名称,大小,分配,修改时间,属性,文件,文件夹,DRIVECAPACITY,FREESPACE,USEDSPACE,RESERVEDSPACE\n\
+\"C:\\\",248080298556,233341861888,2026/04/27 15:54:23,262182,839488,169404,994889916416,755514159104,239375757312,5585870848\n\
+\"C:\\Users\\\",81625301726,81266184192,2026/04/27 15:54:23,1,550915,98814\n",
+        )).unwrap();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].path, PathBuf::from("C:\\"));
+        assert_eq!(records[0].size, 248080298556);
+        assert_eq!(records[0].n_folders, 169404);
+        assert!(records[0].folder);
+        assert_eq!(records[1].path, PathBuf::from("C:\\Users\\"));
+        assert_eq!(records[1].alloc, 81266184192);
+        assert_eq!(records[1].n_files, 550915);
+        assert!(records[1].folder);
     }
 
     /// 控制调用的时间频率
